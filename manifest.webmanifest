@@ -1,0 +1,16 @@
+{
+  "name": "SpeakUp · 英语精进",
+  "short_name": "SpeakUp",
+  "description": "每天 15 分钟：语块、说出来、听说、AI 陪练。为打游戏和外企工作练口语。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f5f6fa",
+  "theme_color": "#4f46e5",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
