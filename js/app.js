@@ -330,7 +330,7 @@
   let shadow = null;              // 正在跟读录音 {i, rec}
   let chatDraft = '', chatBusy = false, chatError = '', showScenarios = false;
   let mono = null, monoResult = null;
-  let aiTesting = false;
+  let aiTesting = false, asrTesting = false;
   let installPrompt = null;
 
   Speech.configure(() => ({ voice: S.settings.voice, rate: S.settings.rate }));
@@ -539,7 +539,7 @@
       ? `<div class="prompt-zh">${esc(c.zh)}</div>
          ${c.exZh ? `<div class="muted">例：${esc(c.exZh)}</div>` : ''}
          ${!vRevealed ? `<p class="hint">用英语把这个表达说出来（可以大声说，也可以点麦克风）</p>
-           <div class="row center">${micBtn('chunk', 0, false)}<button class="btn big" data-act="reveal-card">看答案 <kbd>空格</kbd></button></div>${heard}` : ''}`
+           <div class="row center">${micBtn('chunk', 0, false)}<button class="btn big" data-act="reveal-card">看答案 <kbd>空格</kbd></button></div>${mic && mic.kind === 'chunk' ? `<div class="heard" id="heard-live">${esc(chunkHeard || '')}</div>` : heard}` : ''}`
       : `<div class="word">${esc(c.en)}</div>
          <div class="ipa">${esc(c.ipa || '')} <button class="icon-btn" data-say="${esc(c.en)}" title="朗读 (R)">🔊</button></div>
          ${!vRevealed ? `<button class="btn big" data-act="reveal-card">看意思 <kbd>空格</kbd></button>
@@ -595,33 +595,46 @@
   }
 
   // ================= 麦克风 =================
+  // 按钮状态：准备中（还不能说）→ 在听（可以说，带音量条）→ 识别中
   function micBtn(kind, i, big = false) {
     const on = mic && mic.kind === kind && mic.i === i;
-    return `<button class="btn ${on ? 'rec' : 'ghost'} ${big ? 'big' : ''}" data-act="mic" data-kind="${kind}" data-i="${i}">${on ? '⏹ 说完了' : '🎤 说'}</button>`;
+    const cls = `btn ${big ? 'big' : ''}`;
+    if (!on) return `<button class="${cls} ghost" data-act="mic" data-kind="${kind}" data-i="${i}">🎤 说</button>`;
+    if (mic.phase === 'starting') return `<button class="${cls} ghost wait" data-act="mic" data-kind="${kind}" data-i="${i}">⏳ 准备中…先别说</button>`;
+    if (mic.phase === 'transcribing') return `<button class="${cls} ghost" disabled>✍️ 识别中…</button>`;
+    return `<button class="${cls} rec" data-act="mic" data-kind="${kind}" data-i="${i}"><span class="lvl"><i></i></span>⏹ 说完了</button>`;
   }
-  function stopMic() { if (mic) { Speech.stopListening(); } }
+  function stopMic() { if (mic) Speech.stopCapture(); }
 
+  let emptyInRow = 0;   // 连续几次没识别到内容
   function startMic(kind, i) {
-    if (mic) { Speech.stopListening(); return; }
-    mic = { kind, i };
+    if (mic) {                                      // 再点一次 = 说完了
+      if (mic.phase !== 'transcribing') Speech.stopCapture();
+      return;
+    }
+    mic = { kind, i, phase: 'starting' };
     const setText = t => {
-      if (kind === 'say') { (ui.say[i] = ui.say[i] || {}).input = t; const el = document.querySelector(`[data-input="say"][data-i="${i}"]`); if (el) el.value = t; }
+      if (kind === 'say') { const u = ui.say[i] = ui.say[i] || {}; u.input = t; u.via = 'voice'; const el = document.querySelector(`[data-input="say"][data-i="${i}"]`); if (el) el.value = t; }
       else if (kind === 'chat') { chatDraft = t; const el = $('#chat-input'); if (el) el.value = t; }
-      else if (kind === 'chunk') { chunkHeard = t; }
+      else if (kind === 'chunk') { chunkHeard = t; const el = $('#heard-live'); if (el) el.textContent = t; }
     };
-    Speech.listen({
+    Speech.capture({
       continuous: kind !== 'chunk',
+      autoStop: kind === 'chunk' ? 1500 : 0,
+      onState: phase => { if (mic) { mic.phase = phase; render(); } },
+      onLevel: lv => { const el = document.querySelector('.btn.rec .lvl i'); if (el) el.style.transform = `scaleY(${Math.min(1, 0.15 + lv * 2.5)})`; },
       onText: setText,
       onError: m => flash(m),
       onEnd: final => {
         mic = null;
+        if (final) emptyInRow = 0;
+        else if (++emptyInRow >= 2 && !Speech.cloudReady()) { emptyInRow = 0; flash('识别不稳定？到「我的 → 语音识别」开启 SenseVoice，更准也免费'); }
         if (kind === 'chunk') { chunkHeard = final; vRevealed = true; render(); return; }
         if (final) setText(final);
         if (kind === 'chat' && S.settings.autoSend && final) { chatSend(final); return; }
         render();
       },
     });
-    render();
   }
 
   // ================= 说出来 =================
@@ -635,6 +648,7 @@
       return head + `
         <textarea data-input="say" data-i="${i}" rows="2" placeholder="用英语说出来（点 🎤）或者直接打字…">${esc(u.input || '')}</textarea>
         <div class="row">${micBtn('say', i)}<button class="btn" data-act="say-submit" data-i="${i}" ${u.loading ? 'disabled' : ''}>${u.loading ? 'AI 批改中…' : AI.ready() ? '提交给 AI 批改' : '对照参考答案'}</button></div>
+        ${u.via === 'voice' && u.input && !(mic && mic.kind === 'say' && mic.i === i) ? '<p class="muted small">识别有错的词可以直接在上面改，再提交。</p>' : ''}
         ${u.error ? `<div class="error">${esc(u.error)} <button class="btn ghost sm" data-act="say-ref" data-i="${i}">直接看参考答案</button></div>` : ''}`;
     }
     const r = u.result;
@@ -657,7 +671,7 @@
     if (!input) { flash('先说一句或写一句再提交'); return; }
     u.loading = true; u.error = ''; render();
     try {
-      const r = await AI.grade(SAY[i][0], SAY[i][1], input);
+      const r = await AI.grade(SAY[i][0], SAY[i][1], input, u.via === 'voice' ? 'voice' : 'typed');
       u.result = { ai: r }; u.again = false;
       markDone('say', i, r.verdict === 'great');
     } catch (e) { u.error = e.message; }
@@ -710,7 +724,7 @@
     const recording = shadow && shadow.i === i;
     const step2 = `<div class="shadow">
         <div class="shadow-title">② 跟读：先听一遍，再模仿语调和节奏说出来</div>
-        <div class="row">${recording ? (shadow.playing ? '<span class="muted small">🔊 先听一遍原音…</span>' : `<button class="btn rec" data-act="shadow" data-i="${i}">⏹ 说完了</button><span class="muted small">正在录音，跟着说…</span>`)
+        <div class="row">${recording ? (shadow.playing ? '<span class="muted small">🔊 先听一遍原音…</span>' : shadow.finishing ? '<span class="muted small">✍️ 识别中…</span>' : `<button class="btn rec" data-act="shadow" data-i="${i}">⏹ 说完了</button><span class="muted small">正在录音，跟着说…</span>`)
           : `<button class="btn ghost" data-act="shadow" data-i="${i}">🎙 ${sh ? '再跟读一次' : '开始跟读'}</button>`}
           ${u.result || done ? `<button class="btn ghost sm" data-act="redo" data-i="${i}">重新听写</button>` : ''}</div>
         ${sh ? `<div class="shadow-result">
@@ -752,9 +766,16 @@
     const u = ui.listen[i] || (ui.listen[i] = {});
     if (shadow && shadow.i === i) {                  // 结束跟读
       if (shadow.playing) return;
-      const s = shadow; shadow = null;
-      Speech.stopListening();
+      const s = shadow;
+      s.finishing = true;
+      render();
       const rec = s.rec ? await s.rec.stop().catch(() => null) : null;
+      if (s.live) {                                  // 浏览器识别：等它把最后一段交回来
+        await new Promise(res => { s.onDone = res; Speech.stopCapture(); setTimeout(res, 2500); });
+      } else if (rec && Speech.cloudReady()) {       // SenseVoice：直接识别刚才的录音
+        try { s.heard = await Speech.transcribe(rec.blob); } catch (e) { flash(e.message); }
+      }
+      shadow = null;
       u.shadow = { url: rec ? rec.url : '', heard: s.heard ?? null };
       if (s.heard != null) u.shadow.diff = diffWords(LISTEN[i][0], s.heard);
       render();
@@ -762,15 +783,18 @@
     }
     if (shadow) return;
     stopMic();
-    const s = { i, rec: null, heard: null, playing: true };
+    const s = { i, rec: null, heard: null, playing: true, live: false };
     shadow = s;
     render();
     await Speech.speak(LISTEN[i][0]);                // 先放一遍原音
     s.playing = false;
     if (shadow !== s) return;
     if (Speech.hasRecorder) { try { s.rec = await Speech.record(); } catch (e) { flash('无法录音：' + (e.message || '没有麦克风权限')); } }
-    if (Speech.hasASR) Speech.listen({ continuous: true, onText: t => { s.heard = t; }, onEnd: t => { if (t) s.heard = t; }, onError: m => m && flash(m) });
-    if (!s.rec && !Speech.hasASR) { shadow = null; flash('这个浏览器不支持录音和语音识别，可以对着原音大声跟读'); }
+    if (!Speech.cloudReady() && Speech.hasASR) {
+      s.live = true;
+      Speech.capture({ continuous: true, onText: t => { s.heard = t; }, onEnd: t => { if (t) s.heard = t; if (s.onDone) s.onDone(); }, onError: m => m && flash(m) });
+    }
+    if (!s.rec && !s.live) { shadow = null; flash('这个浏览器不支持录音和语音识别，可以对着原音大声跟读'); }
     render();
   }
 
@@ -915,6 +939,7 @@
     const s = S.settings;
     const ai = AI.config(), P = AI.PROVIDERS[ai.provider];
     const sync = GistSync.config();
+    const asr = Speech.asrConfig();
     const num = (key, label, min, max, note = '') => `<label class="setting"><span>${label}${note ? `<small class="muted">${note}</small>` : ''}</span><input type="number" data-setting="${key}" value="${s[key]}" min="${min}" max="${max}"></label>`;
     const decks = ['game', 'work', 'tech', 'daily', 'vocab'].map(d => `<label class="toggle"><input type="checkbox" data-deck-toggle="${d}" ${s.decks[d] ? 'checked' : ''}> ${TAGS[d].icon} ${TAGS[d].name}</label>`).join('');
     const voiceOpts = ['<option value="">自动选择（推荐）</option>', ...Speech.voices().map(v => `<option value="${esc(v.name)}" ${v.name === s.voice ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`)].join('');
@@ -939,6 +964,24 @@
         ${ai.provider === 'custom' ? `<label class="setting"><span>接口地址<small class="muted">例如 https://dashscope.aliyuncs.com/compatible-mode/v1</small></span><input id="ai-base" value="${esc(ai.baseUrl)}" placeholder="https://..." autocomplete="off"></label>` : ''}
         <div class="row"><button class="btn" data-act="ai-save">保存</button><button class="btn ghost" data-act="ai-test" ${aiTesting ? 'disabled' : ''}>${aiTesting ? '测试中…' : '测试连接'}</button></div>
         <p class="muted small">🔒 Key 只保存在这台设备的浏览器里，不会同步，也不会发给除服务商以外的任何地方。每台设备需要各填一次。</p>
+      </section>
+
+      <section class="card" id="sec-asr">
+        <h3 class="card-title">🎤 语音识别 ${Speech.cloudReady() ? '<span class="pill mature">SenseVoice</span>' : '<span class="pill new">浏览器自带</span>'}</h3>
+        <label class="setting"><span>识别引擎</span><select id="asr-engine">
+          <option value="browser" ${asr.engine !== 'sensevoice' ? 'selected' : ''}>浏览器自带（实时出字，口音容易识别错）</option>
+          <option value="sensevoice" ${asr.engine === 'sensevoice' ? 'selected' : ''}>硅基流动 SenseVoice（推荐：更准、免费、国内直连）</option>
+        </select></label>
+        ${asr.engine === 'sensevoice' ? `
+          <ol class="steps">
+            <li>打开 <a href="${Speech.SENSEVOICE.keyUrl}" target="_blank" rel="noopener">硅基流动 API 密钥页面</a>，用手机号登录，点「新建 API 密钥」。</li>
+            <li>把密钥（sk- 开头）粘贴到下面，点「保存」，再点「测试」。SenseVoice 模型免费，不用充值。</li>
+          </ol>
+          <label class="setting"><span>硅基流动 Key</span><input id="asr-key" type="password" value="${esc(asr.key)}" placeholder="sk-..." autocomplete="off"></label>
+          <div class="row"><button class="btn" data-act="asr-save">保存</button><button class="btn ghost" data-act="asr-test" ${asrTesting ? 'disabled' : ''}>${asrTesting ? '测试中…' : '测试'}</button></div>
+          <p class="muted small">用法：点 🎤 → 按钮变红、出现音量条后开口 → 说完点「说完了」→ 一两秒后出文字。Key 只保存在这台设备。</p>`
+        : `<p class="muted small">点 🎤 后等按钮变红再开口；说完点「说完了」；识别错的词可以直接改。${Speech.hasASR ? '' : '<b>这个浏览器不支持自带识别，请切换到 SenseVoice。</b>'}</p>`}
+        <p class="muted small">浏览器自带识别：${Speech.hasASR ? '✅ 支持' : '❌ 不支持'} · 录音：${Speech.hasRecorder ? '✅ 支持' : '❌ 不支持'}</p>
       </section>
 
       <section class="card" id="sec-sync">
@@ -988,7 +1031,6 @@
         <label class="setting"><span>语块自动发音</span><input type="checkbox" data-setting="autoSpeak" ${s.autoSpeak ? 'checked' : ''}></label>
         <div class="row"><button class="btn ghost" data-say="Nice shot! Let's rotate to B and play for the retake.">试听</button></div>`
         : '<p class="muted">这个浏览器不支持朗读，建议用 Edge、Chrome 或 Safari。</p>'}
-        <p class="muted small">语音识别：${Speech.hasASR ? '✅ 支持' : '❌ 不支持（可以用输入法的语音输入代替）'} · 录音：${Speech.hasRecorder ? '✅ 支持' : '❌ 不支持'}</p>
       </section>
 
       <section class="card">
@@ -1082,7 +1124,7 @@
       case 'say-submit': return saySubmit(i);
       case 'say-ref': { const u = ui.say[i] || (ui.say[i] = {}); u.result = { ai: null }; u.error = ''; return render(); }
       case 'say-grade': markDone('say', i, d.g === '1'); return render();
-      case 'say-again': { const u = ui.say[i] || (ui.say[i] = {}); u.result = null; u.again = true; u.input = ''; return render(); }
+      case 'say-again': { const u = ui.say[i] || (ui.say[i] = {}); u.result = null; u.again = true; u.input = ''; u.via = ''; return render(); }
       // 听说
       case 'play': return playListen(i);
       case 'play-slow': return playListen(i, SLOW);
@@ -1116,6 +1158,20 @@
         aiTesting = true; render();
         try { await AI.test(); flash('✅ 连接成功，可以开始 AI 陪练了'); } catch (e) { flash('❌ ' + e.message); }
         aiTesting = false; return render();
+      }
+      case 'asr-save': {
+        const key = $('#asr-key').value.trim();
+        Speech.saveAsrConfig({ ...Speech.asrConfig(), engine: 'sensevoice', key });
+        flash(key ? '已保存，点「测试」确认一下' : '还没填 Key');
+        return render();
+      }
+      case 'asr-test': {
+        const key = $('#asr-key').value.trim();
+        if (!key) { flash('先粘贴硅基流动的 Key'); return; }
+        asrTesting = true; render();
+        try { await Speech.testCloud(key); Speech.saveAsrConfig({ ...Speech.asrConfig(), engine: 'sensevoice', key }); flash('✅ SenseVoice 可以用了，去练习试试'); }
+        catch (e) { flash('❌ ' + e.message); }
+        asrTesting = false; return render();
       }
       case 'sync-connect': {
         const token = $('#sync-token').value.trim();
@@ -1169,6 +1225,7 @@
   document.addEventListener('change', e => {
     const t = e.target;
     if (t.id === 'import-file' && t.files[0]) return importData(t.files[0]);
+    if (t.id === 'asr-engine') { Speech.saveAsrConfig({ ...Speech.asrConfig(), engine: t.value }); return render(); }
     if (t.id === 'ai-provider') {
       const p = t.value, cur = AI.config();
       AI.saveConfig({ provider: p, apiKey: p === cur.provider ? cur.apiKey : '', model: AI.PROVIDERS[p].model, baseUrl: AI.PROVIDERS[p].base || '' });

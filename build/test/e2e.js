@@ -16,12 +16,22 @@ const ok = (cond, msg) => { console.log((cond ? '  ok   ' : '  FAIL ') + msg); i
 const gists = {};          // 模拟 GitHub Gist
 const calls = [];
 let claudeReplies = 0;
+let siliconText = '<|en|><|NEUTRAL|>Two on B, one behind the car.';
 const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
 
 async function fakeFetch(url, init = {}) {
   url = String(url);
   const method = (init.method || 'GET').toUpperCase();
   let raw = init.body;
+  if (raw && typeof raw.append === 'function' && typeof raw.get === 'function') {
+    const form = { model: raw.get('model'), file: raw.get('file') };
+    calls.push({ url, method, body: form, headers: init.headers });
+    if (url.startsWith('https://api.siliconflow.cn/v1/audio/transcriptions')) {
+      if (new Headers(init.headers).get('authorization') !== 'Bearer sk-sf-good') return json({ code: 20015, message: 'Invalid token' }, 401);
+      return json({ text: siliconText });
+    }
+    throw new Error('unexpected form upload ' + url);
+  }
   if (raw && typeof raw !== 'string') raw = typeof raw.getReader === 'function' ? await new Response(raw).text() : Buffer.from(raw).toString('utf8');
   let body = null;
   try { body = raw ? JSON.parse(raw) : null; } catch (e) { console.log('  DEBUG unparsable body for', url, typeof init.body, String(raw).slice(0, 80)); throw e; }
@@ -70,10 +80,31 @@ function openDevice(storage) {
   w.speechSynthesis = { speak(u) { setTimeout(() => u.onend && u.onend(), 0); }, cancel() {}, getVoices: () => [{ name: 'Aria Natural', lang: 'en-US' }], addEventListener() {} };
   w.SpeechSynthesisUtterance = class { constructor(t) { this.text = t; } };
   w.nextSpeech = '';
+  w.asrMode = 'normal';     // normal | interim-only | drop-then-continue
+  w.asrStarts = 0;
   w.webkitSpeechRecognition = class {
-    start() { setTimeout(() => { const r = [{ transcript: w.nextSpeech }]; r.isFinal = true; this.onresult && this.onresult({ resultIndex: 0, results: [r] }); if (!this.continuous) this.onend && this.onend(); }, 0); }
+    start() {
+      const n = ++w.asrStarts;
+      setTimeout(() => {
+        this.onstart && this.onstart();
+        const emit = (t, fin) => { const r = [{ transcript: t }]; r.isFinal = fin; this.onresult && this.onresult({ resultIndex: 0, results: [r] }); };
+        if (w.asrMode === 'interim-only') emit(w.nextSpeech, false);            // 用户按停止时还没确认
+        else if (w.asrMode === 'drop-then-continue') {
+          if (w.asrStarts === w.asrFirst) { emit("I can't reproduce", true); setTimeout(() => this.onend && this.onend(), 5); }   // 停顿后浏览器自己结束
+          else emit('the bug on my board', true);
+        } else emit(w.nextSpeech, true);
+        if (!this.continuous) this.onend && this.onend();
+      }, 0);
+    }
     stop() { setTimeout(() => this.onend && this.onend(), 0); }
   };
+  Object.defineProperty(w.navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) } });
+  w.MediaRecorder = class {
+    constructor() { this.mimeType = 'audio/webm'; }
+    start() {}
+    stop() { setTimeout(() => { this.ondataavailable && this.ondataavailable({ data: new w.Blob(['x'], { type: 'audio/webm' }) }); this.onstop && this.onstop(); }, 0); }
+  };
+  w.URL.createObjectURL = () => 'blob:test';
   for (const f of SCRIPTS) w.eval(read(f));
   const $ = s => w.document.querySelector(s);
   const $$ = s => [...w.document.querySelectorAll(s)];
@@ -184,6 +215,53 @@ function openDevice(storage) {
   A.click(A.$(`[data-act="say-submit"][data-i="${extra.dataset.i}"]`));
   await sleep(20);
   ok(A.text().includes('能听懂，还可以更自然') && A.text().includes('报点更短更好'), '说出来：AI 批改显示结果和解释');
+
+  // 语音识别：三种“读不到”的情况
+  console.log('\n[语音识别]');
+  const sayMic = () => A.$$('[data-act="mic"][data-kind="say"]').pop();
+  const sayBox = () => A.$$('[data-input="say"]').pop();
+  A.click(A.$('[data-act="extra"][data-cat="say"]'));
+  A.w.nextSpeech = 'two on B';
+  A.click(sayMic());
+  ok(sayMic().textContent.includes('准备中'), '点麦克风后先显示“准备中…先别说”');
+  await sleep(10);
+  ok(A.$('.btn.rec .lvl') && sayMic().textContent.includes('说完了'), '开始听之后按钮变红，带音量条');
+  A.click(sayMic()); await sleep(20);
+  ok(sayBox().value === 'two on B', '正常识别：文字填进输入框');
+  A.click(A.$(`[data-act="say-submit"][data-i="${sayBox().dataset.i}"]`)); await sleep(20);
+  ok(calls.filter(c => c.url.includes('deepseek')).pop().body.messages[1].content.includes('spoken aloud'), '批改时告诉 AI 这句是语音识别的');
+
+  A.click(A.$('[data-act="extra"][data-cat="say"]'));
+  A.w.asrMode = 'interim-only'; A.w.nextSpeech = 'he is low one shot';
+  A.click(sayMic()); await sleep(10); A.click(sayMic()); await sleep(20);
+  ok(sayBox().value === 'he is low one shot', '按“说完了”时最后一段没确认，也不会被吃掉');
+
+  A.click(A.$('[data-act="extra"][data-cat="say"]'));
+  A.w.asrMode = 'drop-then-continue'; A.w.asrFirst = A.w.asrStarts + 1;
+  A.click(sayMic()); await sleep(40);
+  ok(sayMic() && sayMic().textContent.includes('说完了'), '说话停顿、浏览器自己停了之后会自动接着听');
+  A.click(sayMic()); await sleep(20);
+  ok(sayBox().value === "I can't reproduce the bug on my board", '停顿前后两段话都保留：' + sayBox().value);
+  A.w.asrMode = 'normal';
+
+  // SenseVoice
+  A.nav('me');
+  A.change(A.$('#asr-engine'), 'sensevoice');
+  A.$('#asr-key').value = 'sk-sf-bad';
+  A.click(A.$('[data-act="asr-test"]')); await sleep(30);
+  ok(A.$('#flash').textContent.includes('Key 无效'), 'SenseVoice：Key 错误时提示');
+  A.$('#asr-key').value = 'sk-sf-good';
+  A.click(A.$('[data-act="asr-test"]')); await sleep(30);
+  ok(A.$('#flash').textContent.includes('可以用了') && A.w.Speech.cloudReady(), 'SenseVoice：测试通过并启用');
+  A.nav('say');
+  A.click(A.$('[data-act="extra"][data-cat="say"]'));
+  A.click(sayMic()); await sleep(10);
+  ok(sayMic().textContent.includes('说完了'), 'SenseVoice：录音中');
+  A.click(sayMic()); await sleep(30);
+  const up = calls.filter(c => c.url.includes('siliconflow')).pop();
+  ok(up.body.model === 'FunAudioLLM/SenseVoiceSmall' && up.body.file, 'SenseVoice：上传录音，模型正确');
+  ok(sayBox().value === 'Two on B, one behind the car.', 'SenseVoice：识别结果去掉了标签，填进输入框');
+  A.w.Speech.saveAsrConfig({ engine: 'browser', key: 'sk-sf-good' });
 
   // 同步：设备 1 开启
   A.nav('me');
