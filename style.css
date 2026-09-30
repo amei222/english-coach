@@ -117,7 +117,7 @@ textarea { resize: vertical; font-family: var(--en); }
 .streak .fire { font-size: 28px; filter: grayscale(1); opacity: .5; }
 .streak.on .fire { filter: none; opacity: 1; }
 .streak b { font-size: 26px; display: block; line-height: 1; }
-.streak small { color: var(--muted); font-size: 12px; }
+.streak small { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .quote { border-left: 4px solid var(--primary); }
 .quote-en { font-family: Georgia, "Times New Roman", serif; font-size: 19px; line-height: 1.5; }
 .quote-cn { margin-top: 6px; color: var(--muted); }
@@ -284,7 +284,7 @@ audio { height: 36px; max-width: 100%; }
 /* ---------- 手机 ---------- */
 @media (max-width: 720px) {
   body { font-size: 15px; }
-  .topbar { padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top)); }
+  .topbar { padding: 10px 14px; padding-top: max(10px, env(safe-area-inset-top)); backdrop-filter: none; background: var(--bg); }
   #nav {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; margin: 0; justify-content: space-around; gap: 0;
     background: var(--card); border-top: 1px solid var(--line); padding: 4px 2px calc(4px + env(safe-area-inset-bottom));
@@ -297,6 +297,7 @@ audio { height: 36px; max-width: 100%; }
   #nav button.active .badge.ok { background: var(--green); }
   main { padding: 16px 12px calc(90px + env(safe-area-inset-bottom)); }
   .hero h1 { font-size: 24px; }
+  .streak { padding: 8px 12px; }
   .tasks { grid-template-columns: 1fr; }
   .stats { grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .stat b { font-size: 22px; }
