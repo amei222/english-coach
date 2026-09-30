@@ -31,6 +31,13 @@ export class AdapterError extends Error {
   }
 }
 
+/** 取出 API 返回体里的错误说明（{"type":"error","error":{"message":...}}），取不到就用 SDK 的 message */
+function apiMessage(err: InstanceType<typeof Anthropic.APIError>): string {
+  const body = err.error as { error?: { message?: unknown } } | undefined;
+  const msg = body?.error?.message;
+  return typeof msg === 'string' ? msg : err.message;
+}
+
 export async function structuredTurn(o: TurnOptions): Promise<TurnResult> {
   const client = new Anthropic({ apiKey: o.apiKey, dangerouslyAllowBrowser: true, timeout: 90_000 });
   let res;
@@ -46,12 +53,18 @@ export async function structuredTurn(o: TurnOptions): Promise<TurnResult> {
     });
   } catch (err) {
     if (err instanceof Anthropic.AuthenticationError) throw new AdapterError('API Key 无效，请到「我的 → AI 设置」检查');
-    if (err instanceof Anthropic.PermissionDeniedError) throw new AdapterError('没有权限调用 Claude（当前网络所在地区可能不受支持）', err.message);
+    if (err instanceof Anthropic.PermissionDeniedError) throw new AdapterError('没有权限调用 Claude（当前网络所在地区可能不受支持）', apiMessage(err));
     if (err instanceof Anthropic.NotFoundError) throw new AdapterError(`找不到模型 ${o.model}，请检查模型名称`);
     if (err instanceof Anthropic.RateLimitError) throw new AdapterError('请求太频繁或额度不足，稍后再试');
-    if (err instanceof Anthropic.BadRequestError) throw new AdapterError('请求被拒绝', err.message);
+    if (err instanceof Anthropic.BadRequestError) {
+      const detail = apiMessage(err);
+      if (/credit balance/i.test(detail)) {
+        throw new AdapterError('Anthropic 账户余额不足：API 需要单独充值（和 Claude 会员订阅是分开计费的）。去 console.anthropic.com → Plans & Billing 充值，或者在设置里换成 DeepSeek');
+      }
+      throw new AdapterError('请求被拒绝', detail);
+    }
     if (err instanceof Anthropic.APIConnectionError) throw new AdapterError('连不上 Anthropic 服务器（需要能访问国外网络）；也可以在设置里换成 DeepSeek');
-    if (err instanceof Anthropic.APIError) throw new AdapterError(`Claude 服务出错 ${err.status ?? ''}`, err.message);
+    if (err instanceof Anthropic.APIError) throw new AdapterError(`Claude 服务出错 ${err.status ?? ''}`, apiMessage(err));
     throw err;
   }
   if (res.stop_reason === 'refusal') {

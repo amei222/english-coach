@@ -110,7 +110,7 @@ Fields:
     if (!claudeLoading) {
       claudeLoading = new Promise((resolve, reject) => {
         const s = document.createElement('script');
-        s.src = 'vendor/claude.js';
+        s.src = 'vendor/claude.js?v=4';
         s.onload = resolve;
         s.onerror = () => { claudeLoading = null; reject(new Error('Claude 组件加载失败，请检查网络后重试')); };
         document.head.appendChild(s);

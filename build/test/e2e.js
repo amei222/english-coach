@@ -35,6 +35,7 @@ async function fakeFetch(url, init = {}) {
     return json({ choices: [{ message: { content: JSON.stringify(content) } }] });
   }
   if (url.startsWith('https://api.anthropic.com')) {
+    if (new Headers(init.headers).get('x-api-key') === 'sk-ant-nocredit') return json({ type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.' }, request_id: 'req_x' }, 400);
     claudeReplies++;
     return json({
       id: 'msg_' + claudeReplies, type: 'message', role: 'assistant', model: 'claude-opus-5-5', stop_reason: 'end_turn', stop_details: null,
@@ -243,6 +244,13 @@ function openDevice(storage) {
   ok(replayed.role === 'assistant' && replayed.content[0].type === 'thinking' && replayed.content[0].signature === 'sig-1', 'Claude：上一轮回复（含 thinking 块）原样发回');
   ok(cc[0].body.system === second.system, 'Claude：整段对话的 system 提示词保持不变');
   ok(D.text().includes('Claude reply 2'), 'Claude：回复显示在对话里');
+
+  D.w.AI.saveConfig({ provider: 'claude', apiKey: 'sk-ant-nocredit', model: 'claude-opus-5-5' });
+  D.nav('me');
+  D.click(D.$('[data-act="ai-test"]'));
+  await sleep(50);
+  const toast = D.$('#flash').textContent;
+  ok(toast.includes('余额不足') && !toast.includes('{'), 'Claude：余额不足时显示中文提示 → ' + toast.slice(0, 30));
 
   console.log(failures ? `\n${failures} 项失败` : '\n全部通过');
   process.exit(failures ? 1 : 0);
