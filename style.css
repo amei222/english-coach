@@ -244,7 +244,7 @@ audio { height: 36px; max-width: 100%; }
 .typing i { display: inline-block; width: 7px; height: 7px; margin: 0 2px; border-radius: 50%; background: var(--muted); animation: blink 1s infinite; }
 .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
 @keyframes blink { 50% { opacity: .2; } }
-.chat-bar { display: flex; gap: 8px; align-items: stretch; position: sticky; bottom: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 8px; box-shadow: var(--shadow); }
+.chat-bar { display: flex; gap: 8px; align-items: stretch; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 8px; box-shadow: var(--shadow); }
 .chat-bar textarea { flex: 1; margin: 0; border: 0; background: transparent; box-shadow: none; resize: none; }
 .chat-actions { display: flex; flex-direction: column; gap: 6px; }
 .chat-opts { font-size: 13px; }
@@ -305,11 +305,11 @@ audio { height: 36px; max-width: 100%; }
   .add-form, .add-form.two { grid-template-columns: 1fr; }
   .word { font-size: 30px; }
   .page-head { flex-direction: column; gap: 4px; }
-  .ex { padding-left: 16px; padding-top: 50px; }
+  .card.ex { padding: 52px 16px 16px; }
   .ex-num { top: 16px; left: 16px; }
   .ex-top { position: absolute; top: 19px; left: 52px; }
   .sc-grid { grid-template-columns: 1fr; }
-  .chat-bar { bottom: calc(70px + env(safe-area-inset-bottom)); }
+  .chat-log { max-height: 48vh; }
   .setting { flex-wrap: wrap; }
   .setting input:not([type=checkbox]):not([type=range]), .setting select { max-width: 100%; }
   .card { padding: 16px; }

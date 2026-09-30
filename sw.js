@@ -1,5 +1,5 @@
 /* 离线缓存：先用缓存秒开，同时后台更新（下次打开生效）。只处理本站文件，不碰 AI / GitHub 请求。 */
-const CACHE = 'speakup-v2';
+const CACHE = 'speakup-v3';
 const CORE = [
   './', './index.html', './style.css', './manifest.webmanifest',
   './data/chunks.js', './data/words.js', './data/practice.js',
