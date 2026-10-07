@@ -105,7 +105,7 @@ main { max-width: 820px; margin: 0 auto; padding: 26px 20px 90px; }
 .page-head h2 { margin: 0; font-size: 24px; }
 .page-head p { margin: 4px 0 0; }
 .counter { font-size: 15px; font-weight: 600; color: var(--primary); white-space: nowrap; padding-top: 6px; }
-input:not([type]), input[type=password], input[type=number], input[type=time], textarea, select, .search {
+input:not([type]), input[type=password], input[type=number], input[type=time], input[type=date], textarea, select, .search {
   width: 100%; border: 1px solid var(--line); background: var(--bg); border-radius: 10px; padding: 10px 12px; outline: none;
   transition: border-color .15s, box-shadow .15s;
 }
