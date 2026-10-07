@@ -255,6 +255,37 @@ audio { height: 36px; max-width: 100%; }
 .stars { color: #f59e0b; letter-spacing: 2px; }
 .fix-row { padding: 6px 0; border-bottom: 1px dashed var(--line); font-family: var(--en); }
 
+/* ---------- 雅思 ---------- */
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: -4px 0 16px; }
+.tab { border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 6px 14px; cursor: pointer; font-size: 14px; }
+.tab.on { background: var(--primary); color: #fff; border-color: var(--primary); }
+.banner.goal { border-style: solid; background: var(--card); }
+.bands { display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 8px; margin: 8px 0; }
+.band { background: var(--bg); border-radius: 12px; padding: 10px 6px; text-align: center; }
+.band b { display: block; font-size: 24px; line-height: 1.2; color: var(--primary); font-family: var(--en); }
+.band span { font-size: 12px; color: var(--muted); }
+.band.main { background: var(--primary-soft); }
+.cue { border: 1px dashed var(--primary); border-radius: 12px; padding: 12px 16px; margin: 10px 0; font-family: var(--en); }
+.cue ul { margin: 4px 0; padding-left: 22px; }
+.prompt-en { font-family: var(--en); font-size: 19px; font-weight: 600; margin: 12px 0 4px; }
+.timer { font-family: var(--en); font-variant-numeric: tabular-nums; font-weight: 600; color: var(--primary); }
+.timer.big { display: block; font-size: 40px; text-align: center; margin: 6px 0; }
+.drill textarea { margin-top: 10px; }
+.drill-nav { margin-top: 16px; }
+.qa { border-top: 1px dashed var(--line); padding-top: 12px; margin-top: 12px; }
+.qa .q { font-weight: 600; font-family: var(--en); }
+.better-block { margin-top: 8px; padding: 10px 12px; background: var(--green-soft); border-radius: 10px; font-family: var(--en); }
+.prompt-box { font-family: var(--en); line-height: 1.6; }
+.prompt-box ul { margin: 4px 0; padding-left: 22px; }
+.write-area { min-height: 280px; font-size: 16px; line-height: 1.7; margin-top: 10px; }
+.wstat { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; font-size: 14px; color: var(--muted); margin-top: 8px; }
+.wstat .btn { margin-left: auto; }
+.improved { white-space: pre-wrap; font-family: var(--en); background: var(--bg); padding: 12px 14px; border-radius: 10px; margin-top: 8px; }
+details summary { cursor: pointer; color: var(--primary); margin-top: 10px; }
+.wlog { border-top: 1px solid var(--line); padding: 6px 0; }
+.wlog summary { color: var(--text); }
+.score-form { grid-template-columns: 150px 1fr auto; max-width: 520px; }
+
 /* ---------- 我的 ---------- */
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
 .stat { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px; text-align: center; }

@@ -1,5 +1,5 @@
 /* 离线缓存：先用缓存秒开，同时后台更新（下次打开生效）。只处理本站文件，不碰 AI / GitHub 请求。 */
-const CACHE = 'speakup-v5';
+const CACHE = 'speakup-v6';
 const CORE = ['./', './manifest.webmanifest', './icons/icon-192.png'];
 
 self.addEventListener('install', e => {

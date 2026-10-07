@@ -1,12 +1,17 @@
-/* SpeakUp · 英语精进 —— 主程序 */
+/* SpeakUp · 英语精进 —— 主程序（目标：雅思 G 类 5.5 + 打工度假） */
 (() => {
   'use strict';
 
   const STORE = 'speakup.v2';
   const CHATS = 'speakup.chats';
-  const MATURE = 21;          // 复习间隔 ≥ 21 天视为已掌握
+  const DRILLS = 'speakup.drills';     // 口语练习（含回答全文，只存本机）
+  const WDRAFT = 'speakup.wdraft';     // 写作草稿
+  const WLOG = 'speakup.wlog';         // 写作批改记录（只存本机）
+  const MATURE = 21;                   // 复习间隔 ≥ 21 天视为已掌握
   const SLOW = 0.6;
-  const MONO_SECONDS = 30;    // 独白至少说 30 秒
+  const MONO_SECONDS = 60;             // 没有 AI 时：Part 2 独白至少说 1 分钟
+  const PART2_LIMIT = 120;             // Part 2 最多说 2 分钟
+  const PREP_SECONDS = 60;             // Part 2 准备 1 分钟
 
   // ================= 工具 =================
   const $ = (s, el = document) => el.querySelector(s);
@@ -18,6 +23,10 @@
   const dayIndex = k => Math.round(parseDay(k).getTime() / 86400000);
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const uniq = a => [...new Set(a)];
+  const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  const fmtSecs = s => `${Math.floor((s || 0) / 60)}:${pad(Math.floor((s || 0) % 60))}`;
+  const wordCount = t => (String(t || '').match(/[A-Za-z0-9'’-]+/g) || []).length;
+  const loadJSON = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (e) { return d; } };
 
   function seededShuffle(arr, seed) {
     const a = arr.slice();
@@ -33,23 +42,31 @@
     return out;
   }
 
-  // 比对用：统一大小写、引号、连字符，0–20 的数字转成单词
+  // 比对用：统一大小写、引号、连字符；连在一起的数字合并（$4.50 = 4.50）；0–20 的数字转成单词
   const NUMS = 'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty'.split(' ');
-  const norm = s => String(s).toLowerCase()
-    .replace(/[’‘`]/g, "'").replace(/[^a-z0-9'\s-]/g, ' ').replace(/-/g, ' ')
-    .split(/\s+/).map(t => t.replace(/^'+|'+$/g, '')).filter(Boolean)
-    .map(t => (/^\d+$/.test(t) && +t <= 20 ? NUMS[+t] : t));
+  const isNum = t => /^\d+$/.test(t);
+  function norm(s) {
+    const out = [];
+    String(s).toLowerCase().replace(/[’‘`]/g, "'").replace(/[^a-z0-9'\s-]/g, ' ').replace(/-/g, ' ')
+      .split(/\s+/).map(t => t.replace(/^'+|'+$/g, '')).filter(Boolean)
+      .forEach(t => { if (isNum(t) && out.length && isNum(out[out.length - 1])) out[out.length - 1] += t; else out.push(t); });
+    return out.map(t => (isNum(t) && +t <= 20 ? NUMS[+t] : t));
+  }
 
   function wordsHtml(text, okFn, badCls) {
     return String(text).split(/\s+/).filter(Boolean)
       .map((w, i) => `<span class="${okFn(w, i) ? 'hit' : badCls}">${esc(w)}</span>`).join(' ');
   }
 
-  // 逐词最长公共子序列比对（听写、跟读）
+  // 逐词最长公共子序列比对（听写、跟读）。电话号码这类分开写的数字也合在一起比
   function diffWords(target, input) {
     const tok = s => {
       const words = String(s).split(/\s+/).filter(Boolean), flat = [], owner = [];
-      words.forEach((w, i) => norm(w).forEach(t => { flat.push(t); owner.push(i); }));
+      words.forEach((w, i) => norm(w).forEach(t => {
+        const p = flat.length - 1;
+        if (p >= 0 && isNum(t) && isNum(flat[p]) && owner[p][owner[p].length - 1] === i - 1) { flat[p] += t; owner[p].push(i); }
+        else { flat.push(t); owner.push([i]); }
+      }));
       return { words, flat, owner };
     };
     const A = tok(target), B = tok(input);
@@ -62,7 +79,7 @@
       if (A.flat[i] === B.flat[j]) { aHit[i] = bHit[j] = true; i++; j++; }
       else if (dp[i + 1][j] >= dp[i][j + 1]) i++; else j++;
     }
-    const ok = (T, hits) => T.words.map((_, wi) => T.owner.every((o, k) => o !== wi || hits[k]));
+    const ok = (T, hits) => T.words.map((_, wi) => T.owner.every((os, k) => !os.includes(wi) || hits[k]));
     const aOk = ok(A, aHit), bOk = ok(B, bHit);
     return {
       score: n ? aHit.filter(Boolean).length / n : 0,
@@ -73,28 +90,36 @@
 
   // ================= 内容 =================
   const TAGS = {
-    game: { icon: '🎮', name: '游戏' }, work: { icon: '💼', name: '职场' }, tech: { icon: '🔧', name: '技术' },
+    travel: { icon: '🧳', name: '旅行生活' }, job: { icon: '💼', name: '打工求职' }, ielts: { icon: '📝', name: '雅思' },
     daily: { icon: '💬', name: '日常' }, vocab: { icon: '📚', name: '核心词汇' }, my: { icon: '⭐', name: '我的收藏' },
   };
+  const DECK_PREFIX = { travel: 'tr', job: 'jb', ielts: 'ie', daily: 'd' };
   const tagChip = t => TAGS[t] ? `<span class="chip">${TAGS[t].icon} ${TAGS[t].name}</span>` : '';
   const indexByTag = (arr, pos) => { const g = {}; arr.forEach((x, i) => (g[x[pos]] = g[x[pos]] || []).push(i)); return g; };
-  const MIX = ['game', 'work', 'daily', 'tech'];
-  const SAY_ORDER = roundRobin(MIX.map(t => indexByTag(SAY, 2)[t] || []));
-  const LISTEN_ORDER = roundRobin(MIX.map(t => indexByTag(LISTEN, 1)[t] || []));
-  const SC_ORDER = roundRobin(['game', 'work', 'daily'].map(t => SCENARIOS.filter(s => s.tag === t).map(s => s.id)));
+  const LISTEN_ORDER = roundRobin(['ielts', 'travel', 'ielts', 'job', 'daily'].map((t, k, all) => {
+    const idx = indexByTag(LISTEN, 1)[t] || [];
+    if (t !== 'ielts') return idx;
+    const first = all.indexOf('ielts') === k;            // 雅思题拆成两半，出现频率更高
+    return idx.filter((_, j) => (j % 2 === 0) === first);
+  }));
+  const SC_ORDER = roundRobin(['travel', 'job'].map(t => SCENARIOS.filter(s => s.tag === t).map(s => s.id)))
+    .concat(SCENARIOS.filter(s => s.tag === 'daily').map(s => s.id));
   const SC = Object.fromEntries(SCENARIOS.map(s => [s.id, s]));
+  const KIND_NAME = { p1: 'Part 1', p2: 'Part 2', p3: 'Part 3', mock: '全真模考' };
 
   // ================= 状态 =================
   const DEFAULT = () => ({
-    v: 2,
+    v: 3,
     settings: {
-      t: 0, newPerDay: 8, sayPerDay: 5, listenPerDay: 4, chatGoal: 6,
-      decks: { game: true, work: true, tech: true, daily: true, vocab: false },
+      t: 0, newPerDay: 8, listenPerDay: 5, chatGoal: 6,
+      decks: { travel: true, job: true, ielts: true, daily: true, vocab: true },
       voice: '', rate: 0.95, autoSpeak: true, aiVoice: true, autoSend: true,
+      examDate: '', target: 5.5,
     },
     cards: {}, custom: [],
-    ptr: { say: 0, listen: 0, scenario: 0, topic: 0 },
-    retry: { say: [], listen: [] },
+    ptr: { listen: 0, scenario: 0, topic: 0, p1: 0, p2: 0 },
+    retry: { listen: [] },
+    ielts: { tests: [], speak: [], write: [] },
     today: null, history: {}, updatedAt: 0,
   });
 
@@ -106,10 +131,23 @@
       ...d, ...s,
       settings: { ...d.settings, ...st, decks: { ...d.settings.decks, ...(st.decks || {}) } },
       ptr: { ...d.ptr, ...s.ptr }, retry: { ...d.retry, ...s.retry },
+      ielts: { ...d.ielts, ...(s.ielts || {}) },
       cards: s.cards || {}, custom: Array.isArray(s.custom) ? s.custom : [], history: s.history || {},
     };
   }
-  function load() { try { return normalize(JSON.parse(localStorage.getItem(STORE))); } catch (e) { return DEFAULT(); } }
+  // 旧版本（游戏/外企内容）升级：删掉旧语块进度，打卡记录和收藏保留
+  function migrate(s) {
+    if ((s.v || 2) >= 3) return s;
+    for (const k of Object.keys(s.cards)) if (/^[gwt]:/.test(k)) delete s.cards[k];
+    s.settings.decks = { ...DEFAULT().settings.decks };
+    s.ptr = { ...DEFAULT().ptr };
+    s.retry = { listen: [] };
+    s.today = null;
+    s.v = 3;
+    s.settings.t = Date.now();
+    return s;
+  }
+  function load() { try { return migrate(normalize(JSON.parse(localStorage.getItem(STORE)))); } catch (e) { return DEFAULT(); } }
 
   let S = load();
   function save(opts = {}) {
@@ -118,9 +156,14 @@
     if (opts.sync !== false) schedulePush();
   }
 
-  // 两台设备的进度合并：逐项取较新的，打卡记录取并集
+  // 两台设备的进度合并：逐项取较新的，打卡和成绩记录取并集
+  function mergeRecords(a = [], b = []) {
+    const m = new Map();
+    for (const r of [...a, ...b]) { const o = m.get(r.id); if (!o || (r.del && !o.del)) m.set(r.id, r); }
+    return [...m.values()].sort((x, y) => (x.at || 0) - (y.at || 0));
+  }
   function merge(a, b) {
-    a = normalize(a); b = normalize(b);
+    a = migrate(normalize(a)); b = migrate(normalize(b));
     const [nw, old] = (a.updatedAt || 0) >= (b.updatedAt || 0) ? [a, b] : [b, a];
     const out = JSON.parse(JSON.stringify(nw));
     for (const [k, c] of Object.entries(old.cards)) { const o = out.cards[k]; if (!o || (c.t || 0) > (o.t || 0)) out.cards[k] = c; }
@@ -133,15 +176,15 @@
     out.custom = [...cm.values()];
     if ((old.settings.t || 0) > (out.settings.t || 0)) out.settings = old.settings;
     for (const k of Object.keys(out.ptr)) out.ptr[k] = Math.max(out.ptr[k] || 0, old.ptr[k] || 0);
+    for (const k of ['tests', 'speak', 'write']) out.ielts[k] = mergeRecords(out.ielts[k], old.ielts[k]);
     if (old.today && (!out.today || old.today.date > out.today.date)) out.today = old.today;
     else if (old.today && out.today && old.today.date === out.today.date) {
       const t = out.today, o = old.today;
       for (const f of ['newCount', 'reviewCount', 'bonus', 'chatTurns']) t[f] = Math.max(t[f] || 0, o[f] || 0);
       t.monologue = !!(t.monologue || o.monologue);
-      for (const cat of ['say', 'listen']) {
-        t.items[cat] = uniq([...t.items[cat], ...o.items[cat]]);
-        t.done[cat] = uniq([...t.done[cat], ...o.done[cat]]);
-      }
+      if (t.speak && o.speak) t.speak.done = !!(t.speak.done || o.speak.done);
+      t.items.listen = uniq([...t.items.listen, ...o.items.listen]);
+      t.done.listen = uniq([...t.done.listen, ...o.done.listen]);
     }
     out.updatedAt = Math.max(a.updatedAt || 0, b.updatedAt || 0);
     return out;
@@ -213,14 +256,14 @@
   let DECK = [], CARD = {}, NEWQ = [];
   function buildDeck() {
     const cat = {};
-    for (const k of ['game', 'work', 'tech', 'daily'])
-      cat[k] = CHUNKS[k].map(c => ({ key: k[0] + ':' + c[0], deck: k, en: c[0], zh: c[1], ex: c[2], exZh: c[3] }));
+    for (const k of Object.keys(DECK_PREFIX))
+      cat[k] = CHUNKS[k].map(c => ({ key: DECK_PREFIX[k] + ':' + c[0], deck: k, en: c[0], zh: c[1], ex: c[2], exZh: c[3] }));
     cat.vocab = seededShuffle(WORDS.map(w => ({ key: 'v:' + w[0], deck: 'vocab', en: w[0], ipa: w[1], zh: w[2], colloc: w[3], ex: w[4], exZh: w[5] })), 20260929);
     cat.my = S.custom.filter(c => !c.del).map(c => ({ key: 'my:' + c.en, deck: 'my', en: c.en, zh: c.zh, ex: c.ex || '', exZh: c.exZh || '' }));
-    DECK = [].concat(cat.my, cat.game, cat.work, cat.tech, cat.daily, cat.vocab);
+    DECK = [].concat(cat.my, cat.travel, cat.job, cat.ielts, cat.daily, cat.vocab);
     CARD = Object.fromEntries(DECK.map(c => [c.key, c]));
     const on = S.settings.decks;
-    NEWQ = [...cat.my, ...roundRobin(['game', 'work', 'daily', 'tech', 'vocab'].filter(k => on[k]).map(k => cat[k]))].map(c => c.key);
+    NEWQ = [...cat.my, ...roundRobin(['travel', 'ielts', 'job', 'daily', 'vocab'].filter(k => on[k]).map(k => cat[k]))].map(c => c.key);
   }
 
   function schedule(prev, g) { // g: 0 忘了 1 模糊 2 记得 3 太简单
@@ -244,14 +287,13 @@
   const cardStatus = k => { const c = S.cards[k]; return !c ? ['new', '未学'] : c.interval >= MATURE ? ['mature', '已掌握'] : ['learning', '学习中']; };
 
   // ================= 每日任务 =================
-  function pickItems(cat, n, exclude = []) {
-    const order = cat === 'say' ? SAY_ORDER : LISTEN_ORDER;
+  function pickItems(n, exclude = []) {
     const out = [];
     const taken = i => out.includes(i) || exclude.includes(i);
-    for (const i of S.retry[cat]) { if (out.length >= n) break; if (i < order.length && !taken(i)) out.push(i); }
-    for (let guard = 0; out.length < n && guard < order.length; guard++) {
-      const i = order[S.ptr[cat] % order.length];
-      S.ptr[cat] = (S.ptr[cat] + 1) % order.length;
+    for (const i of S.retry.listen) { if (out.length >= n) break; if (i < LISTEN.length && !taken(i)) out.push(i); }
+    for (let guard = 0; out.length < n && guard < LISTEN_ORDER.length; guard++) {
+      const i = LISTEN_ORDER[S.ptr.listen % LISTEN_ORDER.length];
+      S.ptr.listen = (S.ptr.listen + 1) % LISTEN_ORDER.length;
       if (!taken(i)) out.push(i);
     }
     return out;
@@ -263,25 +305,29 @@
     const st = S.settings;
     S.today = {
       date: k, newCount: 0, reviewCount: 0, bonus: 0,
-      goal: { say: st.sayPerDay, listen: st.listenPerDay, chat: st.chatGoal },
-      items: { say: pickItems('say', st.sayPerDay), listen: pickItems('listen', st.listenPerDay) },
-      done: { say: [], listen: [] },
+      goal: { listen: st.listenPerDay, chat: st.chatGoal },
+      items: { listen: pickItems(st.listenPerDay) },
+      done: { listen: [] },
       scenario: SC_ORDER[S.ptr.scenario % SC_ORDER.length],
-      topic: S.ptr.topic % TOPICS.length,
+      topic: S.ptr.topic % IELTS.P2.length,
+      speak: { kind: ['p1', 'p2', 'p3'][dayIndex(k) % 3], p1: S.ptr.p1, p2: S.ptr.p2, p3: S.ptr.p2 + 8, done: false },
       chatTurns: 0, monologue: false,
     };
     S.ptr.scenario = (S.ptr.scenario + 1) % SC_ORDER.length;
-    S.ptr.topic = (S.ptr.topic + 1) % TOPICS.length;
+    S.ptr.topic = (S.ptr.topic + 1) % IELTS.P2.length;
+    S.ptr.p1 = (S.ptr.p1 + 1) % IELTS.P1.length;
+    S.ptr.p2 = (S.ptr.p2 + 1) % IELTS.P2.length;
     save();
     return true;
   }
 
   const TASKS = [
-    { id: 'chunks', icon: '🧠', name: '语块记忆', desc: '整块记表达，按遗忘曲线复习' },
-    { id: 'say', icon: '🗣️', name: '说出来', desc: '看中文情境，用英语说出来' },
-    { id: 'listen', icon: '🎧', name: '听说训练', desc: '先听写，再跟读' },
-    { id: 'chat', icon: '🤖', name: 'AI 陪练', desc: '真实场景对话，句句纠错' },
+    { id: 'chunks', icon: '🧠', name: '语块记忆', desc: '旅行、打工、雅思表达，按遗忘曲线复习' },
+    { id: 'listen', icon: '🎧', name: '听力', desc: '雅思拼写数字听写 + 跟读' },
+    { id: 'speak', icon: '🎤', name: '雅思口语', desc: 'Part 1/2/3 每天轮换，AI 估分', view: 'ielts' },
+    { id: 'chat', icon: '🤖', name: 'AI 陪练', desc: '打工度假真实场景对话' },
   ];
+  const taskView = id => (TASKS.find(t => t.id === id) || {}).view || id;
   function taskState(id) {
     const t = S.today;
     if (id === 'chunks') {
@@ -289,13 +335,17 @@
       return { done: left === 0, left, pct: did + left ? did / (did + left) : 1,
         text: left === 0 ? `已完成 · 新学 ${t.newCount} · 复习 ${t.reviewCount}` : `新语块 ${newKeys(newLeft()).length} · 待复习 ${dueKeys().length}` };
     }
+    if (id === 'speak') {
+      const done = !!t.speak.done;
+      return { done, left: done ? 0 : 1, pct: done ? 1 : 0, text: done ? '已完成' : `今天练 ${KIND_NAME[t.speak.kind]}` };
+    }
     if (id === 'chat') {
       if (!AI.ready()) return { done: !!t.monologue, left: t.monologue ? 0 : 1, pct: t.monologue ? 1 : 0, text: t.monologue ? '已完成 1 分钟独白' : '未设置 AI：先做 1 分钟独白' };
       const n = t.chatTurns || 0, goal = t.goal.chat;
       return { done: n >= goal, left: Math.max(0, goal - n), pct: Math.min(1, n / goal), text: `${Math.min(n, goal)} / ${goal} 句对话` };
     }
-    const n = t.done[id].length, goal = t.goal[id];
-    return { done: n >= goal, left: Math.max(0, goal - n), pct: Math.min(1, n / goal), text: `${Math.min(n, goal)} / ${goal} 题` };
+    const n = t.done.listen.length, goal = t.goal.listen;
+    return { done: n >= goal, left: Math.max(0, goal - n), pct: Math.min(1, n / goal), text: `${Math.min(n, goal)} / ${goal} 句` };
   }
   const allDone = () => TASKS.every(t => taskState(t.id).done);
   const nextTask = () => (TASKS.find(t => !taskState(t.id).done) || { id: 'home' }).id;
@@ -321,21 +371,57 @@
     return best;
   }
 
+  // ================= 雅思：分数 =================
+  const ieltsRound = x => { const f = Math.floor(x), r = x - f; return r < 0.25 ? f : r < 0.75 ? f + 0.5 : f + 1; };
+  const avg = a => a.reduce((s, x) => s + x, 0) / a.length;
+  const fmtBand = b => (b == null || isNaN(b) ? '—' : Number(b).toFixed(1));
+  function rawToBand(kind, raw) {
+    for (const [min, band] of IELTS.BANDS[kind]) if (raw >= min) return band;
+    return 2;
+  }
+  function predicted() {
+    const I = S.ielts;
+    const live = arr => (arr || []).filter(r => !r.del);
+    const recent = (arr, n, f) => { const a = live(arr).slice(-n).map(f); return a.length ? ieltsRound(avg(a)) : null; };
+    const L = recent(I.tests.filter(t => t.kind === 'listening'), 3, t => t.band);
+    const R = recent(I.tests.filter(t => t.kind === 'readingGT'), 3, t => t.band);
+    const W = recent(I.write, 3, w => w.overall);
+    const Sp = recent(I.speak, 5, s => s.overall);
+    const vals = [L, R, W, Sp].filter(v => v != null);
+    return { L, R, W, S: Sp, overall: vals.length === 4 ? ieltsRound(avg(vals)) : null, partial: vals.length ? ieltsRound(avg(vals)) : null, count: vals.length };
+  }
+  const daysLeft = () => (S.settings.examDate ? Math.round((parseDay(S.settings.examDate) - parseDay(S.today.date)) / 86400000) : null);
+  function phase() {
+    const d = daysLeft();
+    if (d == null) return null;
+    if (d < 0) return { name: '考完了', tip: '把听力阅读成绩记到下面。差一点没到的话，可以考虑只重考一科（One Skill Retake），申请签证前先确认对方是否接受。' };
+    if (d <= 45) return { name: '冲刺期', tip: '每周 2 次口语全真模考 + 2 套剑雅听力阅读限时；写作每周 2 篇，按批改把同一篇改到满意。' };
+    if (d <= 120) return { name: '专项期', tip: '口语重点练 Part 2/3；写作每周 2 篇（小作文 + 大作文）；剑雅听力、阅读每周各做 1 套并记录成绩。' };
+    return { name: '基础期', tip: '每天完成 4 项打底：语块积累表达、听写练耳朵、口语先把 Part 1 说顺；每周写 1 篇小作文。' };
+  }
+  const DEFAULT_PLAN = '半年计划：前 2 个月打基础（每天 4 项 + 每周 1 篇小作文）→ 中间 2 个月专项（口语 Part 2/3、每周 2 篇作文、每周剑雅听力阅读各 1 套）→ 最后 1–2 个月冲刺（每周全真模考 + 限时套题）。报名后把考试日期填上，会按阶段提醒你。';
+
   // ================= 视图状态 =================
-  const VIEWS = ['home', 'chunks', 'say', 'listen', 'chat', 'me'];
+  const VIEWS = ['home', 'chunks', 'listen', 'ielts', 'chat', 'me'];
   let view = VIEWS.includes(location.hash.slice(1).split('/')[0]) ? location.hash.slice(1).split('/')[0] : 'home';
-  const ui = { say: {}, listen: {} };
+  let ieltsTab = 'today';
+  const ui = { listen: {} };
   let vq = [], vRevealed = false, chunkMode = 'study', chunkSearch = '', chunkFilter = 'all', chunkHeard = null, lastSpoken = null;
-  let mic = null;                 // 正在听写的目标 {kind, i}
-  let shadow = null;              // 正在跟读录音 {i, rec}
+  let mic = null;                 // 正在说话的目标 {kind, i, phase, t0}
+  let shadow = null;              // 正在跟读录音
   let chatDraft = '', chatBusy = false, chatError = '', showScenarios = false;
   let mono = null, monoResult = null;
+  let drillBusy = false, drillError = '';
+  let wBusy = false, wError = '';
   let aiTesting = false, asrTesting = false;
   let installPrompt = null;
+  let drills = loadJSON(DRILLS, {});
+  let wd = { task: 2, i1: 0, i2: 0, text: '', custom: '', useCustom: false, started: 0, result: null, ...loadJSON(WDRAFT, {}) };
 
   Speech.configure(() => ({ voice: S.settings.voice, rate: S.settings.rate }));
 
   function go(v, anchor) {
+    if (v === 'speak') { v = 'ielts'; ieltsTab = 'today'; }
     view = v;
     if (v === 'chunks') chunkMode = 'study';
     try { history.replaceState(null, '', '#' + v); } catch (e) { /* file:// */ }
@@ -346,8 +432,8 @@
   }
 
   function render() {
-    if (ensureToday()) { vq = []; ui.say = {}; ui.listen = {}; }
-    const fn = { home: viewHome, chunks: viewChunks, say: viewSay, listen: viewListen, chat: viewChat, me: viewMe }[view];
+    if (ensureToday()) { vq = []; ui.listen = {}; }
+    const fn = { home: viewHome, chunks: viewChunks, listen: viewListen, ielts: viewIelts, chat: viewChat, me: viewMe }[view];
     $('#app').innerHTML = fn();
     updateNav();
     afterRender();
@@ -358,15 +444,16 @@
       const id = b.dataset.view;
       b.classList.toggle('active', id === view);
       const badge = b.querySelector('.badge');
-      const task = TASKS.find(t => t.id === id);
+      const task = TASKS.find(t => (t.view || t.id) === id);
       if (!task) { badge.hidden = true; return; }
-      const st = taskState(id);
+      const st = taskState(task.id);
       badge.hidden = false;
       badge.className = 'badge' + (st.done ? ' ok' : '');
       badge.textContent = st.done ? '✓' : st.left;
     });
   }
 
+  let lastQuestion = null;
   function afterRender() {
     if (view === 'chunks' && chunkMode === 'study' && vq[0] && lastSpoken !== vq[0]) {
       lastSpoken = vq[0];
@@ -375,22 +462,32 @@
       if (S.settings.autoSpeak && !producing) Speech.speak(c.en);
     }
     if (view === 'chat') { const box = $('#chat-log'); if (box) box.scrollTop = box.scrollHeight; }
+    // 雅思口语：每道新题像考官一样读一遍
+    if (view === 'ielts' && (ieltsTab === 'today' || ieltsTab === 'mock')) {
+      const dr = currentDrill();
+      const st = dr && !dr.finished ? dr.steps[dr.idx] : null;
+      const key = st ? `${dr.key}#${dr.idx}` : null;
+      if (st && key !== lastQuestion && !mic) {
+        lastQuestion = key;
+        if (S.settings.aiVoice) Speech.speak(st.part === 2 ? 'Here is your topic. You have one minute to prepare.' : st.q);
+      }
+    }
   }
 
   // ================= 首页 =================
   const TIPS = [
     '开口比完美更重要。说错了 AI 会帮你改，不说永远学不会。',
-    '每天 15 分钟，比周末突击 2 小时有效得多——关键是“每天”。',
-    '打游戏时先从报点开始：数量 + 位置，比如 “Two on B”。短，但队友最需要。',
+    '每天 25 分钟，比周末突击 3 小时有效得多——关键是“每天”。',
+    '雅思听力 Section 1 的分最好拿：拼写、数字、日期每天练几句，考试时就不慌。',
+    '雅思口语 Part 1 别只答一句：回答 + 原因 + 一个小例子，2–3 句刚好。',
+    'Part 2 准备时只记关键词，别写句子；说的时候按“是什么 → 细节 → 感受”的顺序展开。',
+    '想不起某个词时，用简单的词绕过去，考官更看重你能不能一直说下去。',
+    'G 类小作文先看清对象：写给朋友用口语，写给老板或公司用正式语气。',
+    '大作文最怕跑题：动笔前花 3 分钟列提纲，每段一个观点 + 一个例子。',
+    '用《剑桥雅思》做完一套听力或阅读，把成绩记到「雅思 → 成绩与计划」里，看预估分怎么涨。',
     '背语块时一定要读出声，大脑记住的是“说出来的感觉”。',
-    '跟读时模仿的是语调和节奏，不只是单词。录下来听一遍，差别一下就出来了。',
-    '想不起英文说法时，先用简单的词绕过去：不会说“勘误表”，就说 the list of known chip bugs。',
-    '外企面试最常问的就是 Tell me about yourself，把 30 秒自我介绍练到脱口而出。',
-    '看比赛直播或主播时，留意他们怎么报点、怎么吐槽——这些都是最地道的游戏英语。',
-    '把手机系统语言改成英文，每天被动接触英语。',
-    '别在脑子里先写中文再翻译，直接想“一个外国队友此刻会怎么说”。',
-    'AI 陪练结束后点“结束并点评”，把错得最多的句子收藏进语块，第二天就会考你。',
-    '听不懂的时候，大方说 Sorry, say again? ——母语者自己也天天这么说。',
+    '到了国外，第一周最常用的就是：入境、青旅、电话卡、银行卡、找工作——这些场景先在 AI 陪练里练熟。',
+    '听不懂的时候，大方说 Sorry, could you say that again? ——当地人自己也天天这么说。',
   ];
 
   function heatmap(weeks) {
@@ -420,8 +517,12 @@
     const idx = dayIndex(S.today.date);
     const q = QUOTES[idx % QUOTES.length];
     const done = allDone(), st = streak();
+    const p = predicted(), dl = daysLeft();
+    const ielts = `<button class="banner goal" data-go="ielts">
+        <b>🎯 雅思 G 类目标 ${(+S.settings.target).toFixed(1)}${dl != null && dl >= 0 ? ` · 距考试 ${dl} 天` : ''}</b>
+        <span>预估总分 ${fmtBand(p.overall ?? p.partial)}${p.count < 4 ? `（已有 ${p.count}/4 项数据）` : ''}${phase() ? ` · ${phase().name}` : ''}</span><i>去看看 →</i></button>`;
     const banners = [
-      !AI.ready() && `<button class="banner" data-go="me" data-anchor="sec-ai"><b>🤖 设置 AI 陪练</b><span>填一个 API Key，就能用英语和 AI 对话、每句话都帮你纠错。</span><i>去设置 →</i></button>`,
+      !AI.ready() && `<button class="banner" data-go="me" data-anchor="sec-ai"><b>🤖 设置 AI</b><span>填一个 API Key，口语估分、写作批改、AI 陪练就都能用了。</span><i>去设置 →</i></button>`,
       !GistSync.ready() && `<button class="banner" data-go="me" data-anchor="sec-sync"><b>🔄 开启手机电脑同步</b><span>手机上练的，电脑上也能看到，打卡不断。</span><i>去设置 →</i></button>`,
     ].filter(Boolean).join('');
     const tasks = TASKS.map(t => {
@@ -444,12 +545,13 @@
         </div>
         <div class="streak ${st ? 'on' : ''}"><span class="fire">🔥</span><div><b>${st}</b><small>天连续</small></div></div>
       </section>
+      ${ielts}
       <section class="card quote">
         <div class="quote-en">“${esc(q[0])}” <button class="icon-btn" data-say="${esc(q[0])}" title="朗读">🔊</button></div>
         <div class="quote-cn">${esc(q[1])}</div>
       </section>
       ${banners}
-      <h3 class="section-title">今日练习 <small class="muted">约 15–20 分钟</small></h3>
+      <h3 class="section-title">今日练习 <small class="muted">约 25 分钟</small></h3>
       <section class="tasks">${tasks}</section>
       ${done ? '' : `<div class="center"><button class="btn big" data-go="${nextTask()}">开始练习 →</button></div>`}
       <section class="card"><h3 class="card-title">打卡日历 <small class="muted">近 16 周</small></h3>${heatmap(16)}</section>
@@ -552,7 +654,7 @@
     const q = chunkSearch.trim().toLowerCase();
     const counts = { new: 0, learning: 0, mature: 0 };
     DECK.forEach(c => counts[cardStatus(c.key)[0]]++);
-    const decks = ['all', 'game', 'work', 'tech', 'daily', 'vocab', 'my'];
+    const decks = ['all', 'travel', 'job', 'ielts', 'daily', 'vocab', 'my'];
     const filters = decks.map(d => `<button class="chip-btn ${chunkFilter === d ? 'on' : ''}" data-act="chunk-filter" data-deck="${d}">${d === 'all' ? '全部' : TAGS[d].icon + ' ' + TAGS[d].name}</button>`).join('');
     const list = DECK.filter(c => (chunkFilter === 'all' || c.deck === chunkFilter) && (!q || c.en.toLowerCase().includes(q) || c.zh.includes(q)));
     const rows = list.slice(0, 400).map(c => {
@@ -567,10 +669,10 @@
         <button class="btn ghost" data-act="chunk-study">← 回去练习</button></div>
       <div class="card">
         <h3 class="card-title">⭐ 收藏一个表达</h3>
-        <p class="muted small">打游戏、看视频、开会时听到的好表达，加进来就会排进每天的新语块（优先）。</p>
+        <p class="muted small">看剧、看视频、做剑雅时遇到的好表达，加进来就会排进每天的新语块（优先）。</p>
         <div class="add-form">
-          <input id="cw-en" placeholder="英文，如 That's a wrap" autocomplete="off">
-          <input id="cw-zh" placeholder="中文意思，如 今天就到这" autocomplete="off">
+          <input id="cw-en" placeholder="英文，如 No worries" autocomplete="off">
+          <input id="cw-zh" placeholder="中文意思，如 没事/不客气" autocomplete="off">
           <input id="cw-ex" placeholder="例句（可选）" autocomplete="off">
           <button class="btn" data-act="add-custom">收藏</button>
         </div>
@@ -612,24 +714,43 @@
       if (mic.phase !== 'transcribing') Speech.stopCapture();
       return;
     }
-    mic = { kind, i, phase: 'starting' };
+    const dr = kind === 'drill' ? currentDrill() : null;
+    const step = dr ? dr.steps[dr.idx] : null;
+    const base = step ? step.answer.trim() : '';   // 口语题：接着上一次的回答往后说
+    mic = { kind, i, phase: 'starting', t0: 0 };
     const setText = t => {
-      if (kind === 'say') { const u = ui.say[i] = ui.say[i] || {}; u.input = t; u.via = 'voice'; const el = document.querySelector(`[data-input="say"][data-i="${i}"]`); if (el) el.value = t; }
-      else if (kind === 'chat') { chatDraft = t; const el = $('#chat-input'); if (el) el.value = t; }
+      if (kind === 'chat') { chatDraft = t; const el = $('#chat-input'); if (el) el.value = t; }
       else if (kind === 'chunk') { chunkHeard = t; const el = $('#heard-live'); if (el) el.textContent = t; }
+      else if (kind === 'drill' && step) {
+        step.answer = base && t ? `${base} ${t}` : base || t;
+        const el = document.querySelector('[data-input="drill"]'); if (el) el.value = step.answer;
+      }
     };
     Speech.capture({
       continuous: kind !== 'chunk',
       autoStop: kind === 'chunk' ? 1500 : 0,
-      onState: phase => { if (mic) { mic.phase = phase; render(); } },
+      onState: ph => {
+        if (!mic) return;
+        mic.phase = ph;
+        if ((ph === 'listening' || ph === 'recording') && !mic.t0) mic.t0 = Date.now();
+        render();
+      },
       onLevel: lv => { const el = document.querySelector('.btn.rec .lvl i'); if (el) el.style.transform = `scaleY(${Math.min(1, 0.15 + lv * 2.5)})`; },
       onText: setText,
       onError: m => flash(m),
       onEnd: final => {
+        const m = mic;
         mic = null;
         if (final) emptyInRow = 0;
         else if (++emptyInRow >= 2 && !Speech.cloudReady()) { emptyInRow = 0; flash('识别不稳定？到「我的 → 语音识别」开启 SenseVoice，更准也免费'); }
         if (kind === 'chunk') { chunkHeard = final; vRevealed = true; render(); return; }
+        if (kind === 'drill' && step) {
+          if (m && m.t0) step.secs = (step.secs || 0) + (Date.now() - m.t0) / 1000;
+          if (final) { setText(final); step.via = 'voice'; }
+          storeDrill(dr);
+          render();
+          return;
+        }
         if (final) setText(final);
         if (kind === 'chat' && S.settings.autoSend && final) { chatSend(final); return; }
         render();
@@ -637,71 +758,30 @@
     });
   }
 
-  // ================= 说出来 =================
-  function sayCard(i, n) {
-    const [zh, ref, tag, tip] = SAY[i];
-    const u = ui.say[i] || (ui.say[i] = {});
-    const done = S.today.done.say.includes(i);
-    const head = `<div class="ex-num">${n + 1}</div><div class="ex-top">${tagChip(tag)}</div><div class="prompt-zh">${esc(zh)}</div>`;
-    const refHtml = `<div class="ref"><span class="label">参考说法</span>${ref.split(' / ').map(s => `<div class="ref-line">${u.input && !u.result?.ai ? wordsHtml(s, w => norm(w).every(t => new Set(norm(u.input)).has(t)), 'plain') : esc(s)} <button class="icon-btn sm" data-say="${esc(s)}">🔊</button></div>`).join('')}</div>`;
-    if (!u.result && !(done && !u.again)) {
-      return head + `
-        <textarea data-input="say" data-i="${i}" rows="2" placeholder="用英语说出来（点 🎤）或者直接打字…">${esc(u.input || '')}</textarea>
-        <div class="row">${micBtn('say', i)}<button class="btn" data-act="say-submit" data-i="${i}" ${u.loading ? 'disabled' : ''}>${u.loading ? 'AI 批改中…' : AI.ready() ? '提交给 AI 批改' : '对照参考答案'}</button></div>
-        ${u.via === 'voice' && u.input && !(mic && mic.kind === 'say' && mic.i === i) ? '<p class="muted small">识别有错的词可以直接在上面改，再提交。</p>' : ''}
-        ${u.error ? `<div class="error">${esc(u.error)} <button class="btn ghost sm" data-act="say-ref" data-i="${i}">直接看参考答案</button></div>` : ''}`;
+  // 计时器：Part 2 准备倒计时、答题计时（Part 2 到 2 分钟自动停）
+  setInterval(() => {
+    if (view !== 'ielts') return;
+    const dr = currentDrill();
+    if (!dr || dr.finished) return;
+    const st = dr.steps[dr.idx];
+    const prepEl = $('#prep-left');
+    if (prepEl && st.prepEnds) {
+      const left = Math.max(0, Math.ceil((st.prepEnds - Date.now()) / 1000));
+      prepEl.textContent = fmtSecs(left);
+      if (left <= 0) { st.prepDone = true; storeDrill(dr); Speech.speak('All right. Please begin speaking now.'); render(); }
     }
-    const r = u.result;
-    const verdict = r && r.ai ? { great: ['great', '👍 很地道'], ok: ['ok', '🙂 能听懂，还可以更自然'], miss: ['miss', '🤔 意思没说对'] }[r.ai.verdict] || ['ok', ''] : null;
-    return head + `
-      ${u.input ? `<div class="yours"><span class="label">你说的</span>${esc(u.input)}</div>` : ''}
-      ${verdict ? `<div class="verdict ${verdict[0]}">${verdict[1]}</div>
-        ${r.ai.verdict !== 'great' ? `<div class="right">✏️ ${esc(r.ai.better)} <button class="icon-btn sm" data-say="${esc(r.ai.better)}">🔊</button></div>` : ''}
-        <div class="why">💬 ${esc(r.ai.explain_zh)}</div>` : ''}
-      ${refHtml}
-      ${tip ? `<div class="why">💡 ${esc(tip)}</div>` : ''}
-      ${done ? `<div class="row"><span class="done-mark">✓ 已完成</span><button class="btn ghost sm" data-act="say-again" data-i="${i}">再说一次</button></div>`
-        : `<div class="row"><button class="btn ghost" data-act="say-grade" data-i="${i}" data-g="1">说对了</button><button class="btn" data-act="say-grade" data-i="${i}" data-g="0">没说好，之后再练</button></div>`}`;
-  }
+    const tEl = $('#drill-timer');
+    if (tEl) {
+      const live = mic && mic.kind === 'drill' && mic.t0 ? (Date.now() - mic.t0) / 1000 : 0;
+      const total = (st.secs || 0) + live;
+      tEl.textContent = fmtSecs(total) + (st.part === 2 ? ' / 2:00' : '');
+      if (st.part === 2 && live && total >= PART2_LIMIT) { flash('2 分钟到了'); Speech.stopCapture(); }
+    }
+  }, 250);
 
-  async function saySubmit(i) {
-    const u = ui.say[i] || (ui.say[i] = {});
-    const input = (u.input || '').trim();
-    if (!AI.ready()) { u.result = { ai: null }; u.again = false; render(); return; }
-    if (!input) { flash('先说一句或写一句再提交'); return; }
-    u.loading = true; u.error = ''; render();
-    try {
-      const r = await AI.grade(SAY[i][0], SAY[i][1], input, u.via === 'voice' ? 'voice' : 'typed');
-      u.result = { ai: r }; u.again = false;
-      markDone('say', i, r.verdict === 'great');
-    } catch (e) { u.error = e.message; }
-    u.loading = false;
-    render();
-  }
+  // ================= 听力 =================
+  const speakText = i => LISTEN[i][2] || LISTEN[i][0];
 
-  function markDone(cat, i, good) {
-    const r = S.retry[cat], pos = r.indexOf(i);
-    if (good && pos >= 0) r.splice(pos, 1);
-    if (!good && pos < 0) r.push(i);
-    if (!S.today.done[cat].includes(i)) S.today.done[cat].push(i);
-    logActivity();
-  }
-
-  function exerciseFooter(cat, title) {
-    if (!taskState(cat).done) return '';
-    return `<div class="card empty small"><p>✅ 今日「${title}」已完成！</p>
-      <div class="row center"><button class="btn ghost" data-act="extra" data-cat="${cat}">再来 1 题</button><button class="btn" data-go="${nextTask()}">${allDone() ? '回到今日' : '下一项 →'}</button></div></div>`;
-  }
-
-  function viewSay() {
-    const t = S.today;
-    return `<div class="page-head"><div><h2>说出来</h2><p class="muted">看到中文情境，直接用英语说。${AI.ready() ? 'AI 会判断你的说法在真实场景里行不行，并给出更地道的版本。' : '说完对照参考答案（设置 AI 后可以自动批改）。'}</p></div>
-      <div class="counter">${taskState('say').text}</div></div>
-      ${t.items.say.map((i, n) => `<div class="card ex" id="say-${i}">${sayCard(i, n)}</div>`).join('')}
-      ${exerciseFooter('say', '说出来')}`;
-  }
-
-  // ================= 听说 =================
   function listenCard(i, n) {
     const [sentence, tag] = LISTEN[i];
     const u = ui.listen[i] || (ui.listen[i] = {});
@@ -728,24 +808,38 @@
           : `<button class="btn ghost" data-act="shadow" data-i="${i}">🎙 ${sh ? '再跟读一次' : '开始跟读'}</button>`}
           ${u.result || done ? `<button class="btn ghost sm" data-act="redo" data-i="${i}">重新听写</button>` : ''}</div>
         ${sh ? `<div class="shadow-result">
-          ${sh.url ? `<div class="row"><span class="label">你的录音</span><audio controls src="${sh.url}"></audio><button class="icon-btn" data-say="${esc(sentence)}" title="听原音">🔊 原音</button></div>` : ''}
+          ${sh.url ? `<div class="row"><span class="label">你的录音</span><audio controls src="${sh.url}"></audio><button class="icon-btn" data-say="${esc(speakText(i))}" title="听原音">🔊 原音</button></div>` : ''}
           ${sh.heard != null ? `<div class="diff"><span class="label">识别到</span>${sh.diff ? sh.diff.inputHtml : esc(sh.heard)} <b class="${sh.diff && sh.diff.score >= 0.8 ? 'ok-text' : ''}">${sh.diff ? Math.round(sh.diff.score * 100) + '%' : ''}</b></div>` : ''}
         </div>` : ''}
       </div>`;
     return controls + step1 + step2;
   }
 
+  function exerciseFooter() {
+    if (!taskState('listen').done) return '';
+    return `<div class="card empty small"><p>✅ 今日听力已完成！</p>
+      <div class="row center"><button class="btn ghost" data-act="extra">再来 1 句</button><button class="btn" data-go="${nextTask()}">${allDone() ? '回到今日' : '下一项 →'}</button></div></div>`;
+  }
+
   function viewListen() {
-    return `<div class="page-head"><div><h2>听说训练</h2><p class="muted">每句两步：先听写练耳朵，再跟读练嘴巴。大小写和标点不影响得分。</p></div>
+    return `<div class="page-head"><div><h2>听力</h2><p class="muted">每句两步：先听写练耳朵，再跟读练嘴巴。人名地址按听到的拼写，数字直接写阿拉伯数字；大小写和标点不影响得分。</p></div>
       <div class="counter">${taskState('listen').text}</div></div>
       ${S.today.items.listen.map((i, n) => `<div class="card ex" id="listen-${i}">${listenCard(i, n)}</div>`).join('')}
-      ${exerciseFooter('listen', '听说训练')}`;
+      ${exerciseFooter()}`;
+  }
+
+  function markListen(i, good) {
+    const r = S.retry.listen, pos = r.indexOf(i);
+    if (good && pos >= 0) r.splice(pos, 1);
+    if (!good && pos < 0) r.push(i);
+    if (!S.today.done.listen.includes(i)) S.today.done.listen.push(i);
+    logActivity();
   }
 
   function playListen(i, rate) {
     const u = ui.listen[i] || (ui.listen[i] = {});
     u.plays = (u.plays || 0) + 1;
-    Speech.speak(LISTEN[i][0], rate);
+    Speech.speak(speakText(i), rate);
     const p = document.getElementById(`plays-${i}`);
     if (p) p.textContent = `已听 ${u.plays} 次`;
     const inp = document.querySelector(`#listen-${i} .dict-input`);
@@ -758,7 +852,7 @@
     if (!input && !confirm('还没写内容，确定直接看原句吗？')) return;
     u.result = diffWords(LISTEN[i][0], input);
     u.redo = false;
-    markDone('listen', i, u.result.score >= 1);
+    markListen(i, u.result.score >= 1);
     render();
   }
 
@@ -777,7 +871,7 @@
       }
       shadow = null;
       u.shadow = { url: rec ? rec.url : '', heard: s.heard ?? null };
-      if (s.heard != null) u.shadow.diff = diffWords(LISTEN[i][0], s.heard);
+      if (s.heard != null) u.shadow.diff = diffWords(speakText(i), s.heard);
       render();
       return;
     }
@@ -786,7 +880,7 @@
     const s = { i, rec: null, heard: null, playing: true, live: false };
     shadow = s;
     render();
-    await Speech.speak(LISTEN[i][0]);                // 先放一遍原音
+    await Speech.speak(speakText(i));                // 先放一遍原音
     s.playing = false;
     if (shadow !== s) return;
     if (Speech.hasRecorder) { try { s.rec = await Speech.record(); } catch (e) { flash('无法录音：' + (e.message || '没有麦克风权限')); } }
@@ -796,6 +890,234 @@
     }
     if (!s.rec && !s.live) { shadow = null; flash('这个浏览器不支持录音和语音识别，可以对着原音大声跟读'); }
     render();
+  }
+
+  // ================= 雅思：口语练习 =================
+  function storeDrill(dr) {
+    drills[dr.key] = dr;
+    const keys = Object.keys(drills).sort();
+    while (keys.length > 12) delete drills[keys.shift()];
+    try { localStorage.setItem(DRILLS, JSON.stringify(drills)); } catch (e) { /* 存不下就只留在内存里 */ }
+  }
+  function newDrill(kind, key) {
+    const sp = S.today.speak, P1 = IELTS.P1, P2 = IELTS.P2;
+    let label, steps;
+    if (kind === 'p1') { const [topic, qs] = P1[sp.p1 % P1.length]; label = `Part 1 · ${topic}`; steps = qs.slice(0, 3).map(q => ({ part: 1, q })); }
+    else if (kind === 'p2') { const card = P2[sp.p2 % P2.length]; label = 'Part 2 · 话题卡'; steps = [{ part: 2, q: card.title, card }]; }
+    else if (kind === 'p3') { const card = P2[sp.p3 % P2.length]; label = 'Part 3 · 深入讨论'; steps = card.p3.map(q => ({ part: 3, q })); }
+    else {
+      const [topic, qs] = P1[(sp.p1 + 7) % P1.length], card = P2[(sp.p2 + 5) % P2.length];
+      label = `全真模考 · ${topic}`;
+      steps = [...qs.map(q => ({ part: 1, q })), { part: 2, q: card.title, card }, ...card.p3.map(q => ({ part: 3, q }))];
+    }
+    return { key, kind, label, steps: steps.map(s => ({ ...s, answer: '', via: '', secs: 0 })), idx: 0, result: null, finished: false };
+  }
+  function getDrill(kind) {
+    const key = `${S.today.date}|${kind}`;
+    if (!drills[key]) drills[key] = newDrill(kind, key);
+    return drills[key];
+  }
+  const currentDrill = () => (ieltsTab === 'mock' ? getDrill('mock') : ieltsTab === 'today' ? getDrill(S.today.speak.kind) : null);
+
+  function viewDrill(dr) {
+    if (dr.finished) return drillResult(dr);
+    const st = dr.steps[dr.idx];
+    const last = dr.idx === dr.steps.length - 1;
+    const part2 = st.part === 2;
+    if (part2 && !st.prepDone && !st.prepEnds) { st.prepEnds = Date.now() + PREP_SECONDS * 1000; storeDrill(dr); }
+    const preparing = part2 && !st.prepDone;
+    const question = part2
+      ? `<div class="cue"><b>${esc(st.card.title)}</b><div class="muted small">You should say:</div><ul>${st.card.bullets.map(b => `<li>${esc(b)}</li>`).join('')}</ul><div>${esc(st.card.why)}</div></div>`
+      : `<div class="prompt-en">${esc(st.q)} <button class="icon-btn" data-say="${esc(st.q)}" title="再听一遍">🔊</button></div>`;
+    const prepHtml = preparing ? `<div class="prep">
+        <div class="timer big" id="prep-left">${fmtSecs(Math.max(0, Math.ceil((st.prepEnds - Date.now()) / 1000)))}</div>
+        <p class="muted small center">准备 1 分钟：在下面记几个关键词（考场上也可以记笔记），时间到会自动开始答题。</p>
+        <textarea data-input="notes" rows="3" placeholder="关键词笔记，比如：where / who / what / why…">${esc(st.notes || '')}</textarea>
+        <div class="row center"><button class="btn" data-act="prep-skip">准备好了，开始说</button></div></div>` : '';
+    const hint = part2 ? '尽量说满 1.5–2 分钟，按提示的几点依次展开' : st.part === 1 ? '回答 + 原因 + 小例子，2–3 句就好' : '给出观点、理由和例子，3–4 句';
+    const answerHtml = preparing ? '' : `
+      ${part2 && st.notes ? `<div class="why">📝 你的笔记：${esc(st.notes)}</div>` : ''}
+      <textarea data-input="drill" rows="${part2 ? 7 : 3}" placeholder="点 🎤 用英语回答（也可以打字）…">${esc(st.answer)}</textarea>
+      <div class="row">${micBtn('drill', dr.idx)}<span class="timer" id="drill-timer">${fmtSecs(st.secs)}${part2 ? ' / 2:00' : ''}</span><span class="muted small">${hint}</span></div>`;
+    const nav = `<div class="row between drill-nav">${dr.idx > 0 ? '<button class="btn ghost" data-act="drill-prev">← 上一题</button>' : '<span></span>'}
+      ${last ? `<button class="btn" data-act="drill-submit" ${drillBusy || preparing ? 'disabled' : ''}>${drillBusy ? 'AI 评分中…' : AI.ready() ? '提交评分' : '完成'}</button>`
+        : `<button class="btn" data-act="drill-next" ${preparing ? 'disabled' : ''}>下一题 →</button>`}</div>`;
+    return `<div class="card drill">
+      <div class="row between"><b>${esc(dr.label)}</b><span class="muted small">第 ${dr.idx + 1} / ${dr.steps.length} 题 · <span class="chip">Part ${st.part}</span></span></div>
+      ${question}${prepHtml}${answerHtml}
+      ${drillError ? `<div class="error">${esc(drillError)}</div>` : ''}
+      ${nav}</div>`;
+  }
+
+  function bandsHtml(list) {
+    return `<div class="bands">${list.map(([name, b, main]) => `<div class="band ${main ? 'main' : ''}"><b>${fmtBand(b)}</b><span>${name}</span></div>`).join('')}</div>`;
+  }
+
+  function drillResult(dr) {
+    const r = dr.result;
+    const items = dr.steps.map((s, k) => {
+      const it = r && r.items && r.items[k];
+      return `<div class="qa">
+        <div class="q"><span class="chip">Part ${s.part}</span> ${esc(s.part === 2 ? s.card.title : s.q)}</div>
+        <div class="yours"><span class="label">你的回答 · ${fmtSecs(s.secs)}</span>${esc(s.answer || '（未作答）')}</div>
+        ${it ? `<div class="better-block"><span class="label">6.5 分参考</span>${esc(it.better)} <button class="icon-btn sm" data-say="${esc(it.better)}">🔊</button></div>
+          <div class="why">💡 ${esc(it.tips_zh)}</div>` : ''}
+      </div>`;
+    }).join('');
+    const chunks = r && r.chunks && r.chunks.length ? `<h4>可以记下来的表达（⭐ 收藏后会进语块复习）</h4>${r.chunks.map(c => `<div class="fix-row"><b>${esc(c.en)}</b> — ${esc(c.zh)} <button class="icon-btn sm" data-say="${esc(c.en)}">🔊</button><button class="icon-btn sm" data-act="star" data-en="${esc(c.en)}" data-zh="${esc(c.zh)}">⭐</button></div>`).join('')}` : '';
+    return `<div class="card">
+      <h3 class="card-title">📋 ${esc(dr.label)} · 结果</h3>
+      ${r ? `${bandsHtml([['口语估分', r.overall, true], ['流利连贯', r.fc], ['词汇', r.lr], ['语法', r.gra]])}
+        <p class="muted small">估分仅供参考：AI 只能看到识别出的文字，听不到声音，所以不含发音分。</p>
+        <p>${esc(r.summary_zh)}</p>${r.pron_note_zh ? `<div class="why">🗣️ ${esc(r.pron_note_zh)}</div>` : ''}`
+        : '<p class="muted">设置 AI 后可以自动估分，并给出每题的 6.5 分参考回答。</p>'}
+      ${items}${chunks}
+      <div class="row"><button class="btn ghost" data-act="drill-retry">同样的题再练一次</button>${dr.kind !== 'mock' && !allDone() ? `<button class="btn" data-go="${nextTask()}">下一项 →</button>` : ''}</div>
+    </div>`;
+  }
+
+  async function drillSubmit() {
+    const dr = currentDrill();
+    if (!dr) return;
+    const st = dr.steps[dr.idx];
+    if (!st.answer.trim()) { flash('先回答这道题（可以说也可以打字）'); return; }
+    if (mic) Speech.stopCapture();
+    dr.steps.forEach(s => { if (!s.via) s.via = 'typed'; });
+    if (AI.ready()) {
+      drillBusy = true; drillError = ''; render();
+      try {
+        dr.result = await AI.speakScore(dr.steps, KIND_NAME[dr.kind]);
+        S.ielts.speak.push({ id: uid(), at: Date.now(), d: S.today.date, kind: dr.kind, overall: dr.result.overall, fc: dr.result.fc, lr: dr.result.lr, gra: dr.result.gra });
+      } catch (e) { drillError = e.message; drillBusy = false; render(); return; }
+      drillBusy = false;
+    }
+    dr.finished = true;
+    storeDrill(dr);
+    if (dr.key.startsWith(S.today.date)) S.today.speak.done = true;
+    logActivity();
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  // ================= 雅思：写作 =================
+  function storeWd() { try { localStorage.setItem(WDRAFT, JSON.stringify(wd)); } catch (e) { /* ignore */ } }
+  function writePrompt() {
+    if (wd.useCustom) return { title: '自定义题目', text: wd.custom, html: '' };
+    if (wd.task === 1) {
+      const w = IELTS.W1[wd.i1 % IELTS.W1.length];
+      return {
+        title: 'Task 1 · 书信（至少 150 词，建议 20 分钟）',
+        text: `${w.prompt} Write a letter. In your letter: ${w.bullets.join('; ')}. Write at least 150 words. You do NOT need to write any addresses. Begin your letter as follows: ${w.to}`,
+        html: `<p>${esc(w.prompt)} Write a letter. In your letter:</p><ul>${w.bullets.map(b => `<li>${esc(b)}</li>`).join('')}</ul>
+          <p class="muted small">Write at least 150 words. You do NOT need to write any addresses.</p><p>Begin your letter as follows: <b>${esc(w.to)}</b></p>`,
+      };
+    }
+    const q = IELTS.W2[wd.i2 % IELTS.W2.length];
+    const text = `${q} Give reasons for your answer and include any relevant examples from your own knowledge or experience. Write at least 250 words.`;
+    return { title: 'Task 2 · 议论文（至少 250 词，建议 40 分钟）', text, html: `<p>${esc(q)}</p><p class="muted small">Give reasons for your answer and include any relevant examples from your own knowledge or experience. Write at least 250 words.</p>` };
+  }
+
+  function viewWrite() {
+    const p = writePrompt();
+    const r = wd.result;
+    const min = wd.task === 1 ? 150 : 250, target = wd.task === 1 ? 20 : 40;
+    const log = loadJSON(WLOG, []).slice(-5).reverse();
+    const prompt = wd.useCustom
+      ? `<textarea data-input="wcustom" rows="3" placeholder="把题目粘贴到这里（比如剑雅真题的题目）">${esc(wd.custom)}</textarea>`
+      : `<div class="prompt-box">${p.html}</div>`;
+    const result = r ? `<div class="card">
+        <h3 class="card-title">📋 批改结果</h3>
+        ${bandsHtml([['写作估分', r.overall, true], [wd.task === 1 ? '任务完成' : '任务回应', r.ta], ['连贯衔接', r.cc], ['词汇', r.lr], ['语法', r.gra]])}
+        <p>${esc(r.summary_zh)}</p>
+        ${r.corrections.length ? `<h4>重点改错</h4>${r.corrections.map(c => `<div class="fix-row"><div class="muted">✗ ${esc(c.original)}</div><div>✓ <b>${esc(c.better)}</b></div><div class="muted small">${esc(c.why_zh)}</div></div>`).join('')}` : ''}
+        <details open><summary>6.5 分改写版（和你的原文逐段对照）</summary><div class="improved">${esc(r.improved)}</div></details>
+        <div class="why">👉 下一步：${esc(r.next_step_zh)}</div>
+        <div class="row"><button class="btn" data-act="w-next">写下一篇</button><button class="btn ghost" data-act="w-revise">在原文上修改，再交一次</button></div>
+      </div>` : '';
+    return `<div class="card">
+        <div class="row between"><div class="row tight">
+          <button class="chip-btn ${wd.task === 1 && !wd.useCustom ? 'on' : ''}" data-act="w-task" data-task="1">小作文 · 书信</button>
+          <button class="chip-btn ${wd.task === 2 && !wd.useCustom ? 'on' : ''}" data-act="w-task" data-task="2">大作文 · 议论文</button>
+          <button class="chip-btn ${wd.useCustom ? 'on' : ''}" data-act="w-custom">用自己的题目</button></div>
+          ${wd.useCustom ? '' : '<button class="btn ghost sm" data-act="w-another">换一题</button>'}</div>
+        <h3 class="card-title" style="margin-top:12px">${esc(p.title)}</h3>
+        ${prompt}
+        <textarea class="write-area" data-input="write" placeholder="在这里写…（建议先花 3 分钟列提纲）" spellcheck="false" ${r ? 'readonly' : ''}>${esc(wd.text)}</textarea>
+        <div class="wstat"><span>字数 <b id="wc">${wordCount(wd.text)}</b> / ${min}</span><span>用时 <b id="wtime">${wd.started ? fmtSecs((Date.now() - wd.started) / 1000) : '0:00'}</b>（建议 ${target} 分钟）</span>
+          ${!r ? `<button class="btn" data-act="w-submit" ${wBusy ? 'disabled' : ''}>${wBusy ? 'AI 批改中…' : '提交批改'}</button>` : ''}</div>
+        ${wError ? `<div class="error">${esc(wError)}</div>` : ''}
+        ${!AI.ready() ? '<p class="muted small">⚠️ 批改需要先在「我的 → AI 设置」填 API Key。</p>' : ''}
+      </div>
+      ${result}
+      ${log.length ? `<div class="card"><h3 class="card-title">最近的批改</h3>${log.map(l => `<details class="wlog"><summary>${l.d} · Task ${l.task} · <b>${fmtBand(l.result.overall)}</b> 分 · ${l.words} 词</summary>
+        <p class="muted small">${esc(l.prompt)}</p><div class="improved">${esc(l.text)}</div><p>${esc(l.result.summary_zh)}</p></details>`).join('')}</div>` : ''}`;
+  }
+
+  async function writeSubmit() {
+    const text = wd.text.trim();
+    const p = writePrompt();
+    if (!AI.ready()) { flash('先在「我的 → AI 设置」填 API Key'); return; }
+    if (!p.text.trim()) { flash('先填题目'); return; }
+    if (wordCount(text) < 40) { flash('写得太少了，至少写 40 个词再提交'); return; }
+    wBusy = true; wError = ''; render();
+    try {
+      const r = await AI.writeScore(wd.task, p.text, text);
+      wd.result = r;
+      storeWd();
+      const rec = { id: uid(), at: Date.now(), d: S.today.date, task: wd.task, overall: r.overall };
+      S.ielts.write.push(rec);
+      const log = loadJSON(WLOG, []);
+      log.push({ ...rec, prompt: p.text, text, words: wordCount(text), result: r });
+      try { localStorage.setItem(WLOG, JSON.stringify(log.slice(-20))); } catch (e) { /* ignore */ }
+      logActivity();
+    } catch (e) { wError = e.message; }
+    wBusy = false;
+    render();
+  }
+
+  // ================= 雅思：成绩与计划 =================
+  function viewScore() {
+    const p = predicted(), ph = phase(), dl = daysLeft();
+    const tests = S.ielts.tests.filter(t => !t.del).slice(-10).reverse().map(t => `<tr><td>${t.d}</td><td>${t.kind === 'listening' ? '听力' : '阅读（G 类）'}</td><td>${t.raw} / 40</td><td><b>${fmtBand(t.band)}</b></td><td><button class="icon-btn sm" data-act="del-test" data-id="${t.id}" title="删除">🗑</button></td></tr>`).join('');
+    const missing = [p.L == null && '听力', p.R == null && '阅读', p.W == null && '写作', p.S == null && '口语'].filter(Boolean);
+    return `<div class="card">
+        <h3 class="card-title">📈 预估总分 <small class="muted">四项平均，按雅思规则取整</small></h3>
+        ${bandsHtml([['总分', p.overall ?? p.partial, true], ['听力', p.L], ['阅读', p.R], ['写作', p.W], ['口语', p.S]])}
+        <p class="muted small">听力、阅读来自你记录的剑雅成绩（最近 3 次平均）；写作、口语来自 AI 估分（最近几次平均，口语不含发音）。${missing.length ? `还缺：${missing.join('、')}，补齐后总分才准。` : ''}</p>
+        ${p.overall != null ? `<div class="why">${p.overall >= +S.settings.target ? '🎉 预估已经达到目标，保持住！' : `距离目标 ${(+S.settings.target).toFixed(1)} 还差 ${(+S.settings.target - p.overall).toFixed(1)} 分，先补最低的那一项。`}</div>` : ''}
+      </div>
+      <div class="card">
+        <h3 class="card-title">📝 记录剑雅听力 / 阅读成绩</h3>
+        <p class="muted small">用《剑桥雅思》真题限时做一套，把答对的题数（满分 40）填进来，自动换算分数。阅读请做 G 类（General Training）。</p>
+        <div class="add-form score-form"><select id="t-kind"><option value="listening">听力</option><option value="readingGT">阅读（G 类）</option></select>
+          <input id="t-raw" type="number" min="0" max="40" placeholder="答对几题（0–40）"><button class="btn" data-act="add-test">记录</button></div>
+        ${tests ? `<div class="table-wrap"><table class="wordlist"><tbody>${tests}</tbody></table></div>` : ''}
+      </div>
+      <div class="card">
+        <h3 class="card-title">🎯 考试与计划</h3>
+        <label class="setting"><span>考试日期<small class="muted">报名后填上，会显示倒计时和阶段建议</small></span><input type="date" data-setting="examDate" value="${esc(S.settings.examDate || '')}"></label>
+        <label class="setting"><span>目标总分<small class="muted">新西兰打工度假要求 5.5，澳洲要求平均 4.5</small></span><select data-setting="target">${[4.5, 5, 5.5, 6, 6.5, 7].map(b => `<option value="${b}" ${+S.settings.target === b ? 'selected' : ''}>${b.toFixed(1)}</option>`).join('')}</select></label>
+        <div class="why">${ph ? `<b>${ph.name}${dl >= 0 ? `（还有 ${dl} 天）` : ''}：</b>${esc(ph.tip)}` : esc(DEFAULT_PLAN)}</div>
+        <p class="muted small">提醒：两国都接受雅思 G 类，必须在考点考（不认可在家考）。新西兰要求成绩不超过 2 年，澳洲要求申请前 12 个月内的成绩。政策会变，申请前以移民局官网为准。</p>
+      </div>`;
+  }
+
+  function viewIelts() {
+    const p = predicted(), dl = daysLeft();
+    const tabs = [['today', '🎤 今日口语'], ['mock', '📋 口语模考'], ['write', '✍️ 写作批改'], ['score', '📈 成绩与计划']]
+      .map(([k, n]) => `<button class="tab ${ieltsTab === k ? 'on' : ''}" data-act="ielts-tab" data-tab="${k}">${n}</button>`).join('');
+    const head = `<div class="page-head"><div><h2>雅思 G 类 · 目标 ${(+S.settings.target).toFixed(1)}</h2>
+      <p class="muted">${dl != null ? (dl >= 0 ? `距离考试 <b>${dl}</b> 天` : '考试日期已过') : '还没填考试日期'} · 预估总分 <b>${fmtBand(p.overall ?? p.partial)}</b>${p.count < 4 ? `（${p.count}/4 项有数据）` : ''}</p></div>
+      ${ieltsTab === 'today' ? `<div class="counter">${taskState('speak').done ? '✓ 今日口语已完成' : ''}</div>` : ''}</div>
+      <div class="tabs">${tabs}</div>`;
+    if (ieltsTab === 'today') {
+      const kinds = ['p1', 'p2', 'p3'].map(k => `<button class="chip-btn ${S.today.speak.kind === k ? 'on' : ''}" data-act="speak-kind" data-kind="${k}">${KIND_NAME[k]}</button>`).join('');
+      return head + `<div class="row tight" style="margin-bottom:12px"><span class="muted small">今天练：</span>${kinds}<span class="muted small">（每天自动轮换，也可以自己换）</span></div>` + viewDrill(getDrill(S.today.speak.kind));
+    }
+    if (ieltsTab === 'mock') {
+      return head + `<p class="muted small">完整流程：Part 1 四题 → Part 2（准备 1 分钟、说 2 分钟）→ Part 3 三题，大约 12 分钟。冲刺期每周做 1–2 次。</p>` + viewDrill(getDrill('mock'));
+    }
+    return head + (ieltsTab === 'write' ? viewWrite() : viewScore());
   }
 
   // ================= AI 陪练 =================
@@ -902,17 +1224,16 @@
       </div>`;
   }
 
+  // 没有 AI 时：用雅思 Part 2 话题卡做 1 分钟独白
   function viewMonologue() {
-    const [topic, zh, chunks] = TOPICS[S.today.topic % TOPICS.length];
+    const card = IELTS.P2[S.today.topic % IELTS.P2.length];
     const r = monoResult;
     return `<div class="page-head"><div><h2>AI 陪练</h2><p class="muted">还没设置 AI。设置后就能和 AI 用英语对话、句句纠错。</p></div></div>
       <button class="banner" data-go="me" data-anchor="sec-ai"><b>🤖 两分钟设置 AI 陪练</b><span>推荐 DeepSeek：国内直连，每天练一次一个月几块钱。</span><i>去设置 →</i></button>
       <div class="card">
-        <h3 class="card-title">今天先做：1 分钟英语独白</h3>
-        <p class="prompt-zh">${esc(topic)} <button class="icon-btn sm" data-say="${esc(topic)}">🔊</button></p>
-        <p class="muted">${esc(zh)}</p>
-        <div class="why">🧩 可以用上：${esc(chunks)}</div>
-        <p class="muted small">对着麦克风说至少 ${MONO_SECONDS} 秒，说完回放听听自己的发音。卡住了也别停，用简单的词绕过去。</p>
+        <h3 class="card-title">今天先做：1 分钟英语独白（雅思 Part 2）</h3>
+        <div class="cue"><b>${esc(card.title)}</b> <button class="icon-btn sm" data-say="${esc(card.title)}">🔊</button><div class="muted small">You should say:</div><ul>${card.bullets.map(b => `<li>${esc(b)}</li>`).join('')}</ul><div>${esc(card.why)}</div></div>
+        <p class="muted small">对着麦克风说至少 1 分钟，说完回放听听自己的发音。卡住了也别停，用简单的词绕过去。</p>
         <div class="row">${mono ? '<button class="btn rec" data-act="mono">⏹ 说完了</button><span class="muted small">录音中…</span>' : `<button class="btn" data-act="mono">🎙 ${r ? '再录一次' : '开始录音'}</button>`}</div>
         ${r ? `<div class="row"><audio controls src="${r.url}"></audio><span class="${r.seconds >= MONO_SECONDS ? 'ok-text' : 'muted'}">${Math.round(r.seconds)} 秒${r.seconds >= MONO_SECONDS ? ' ✓' : `（再多说一点，目标 ${MONO_SECONDS} 秒）`}</span></div>` : ''}
         ${S.today.monologue ? '<div class="done-mark">✓ 今日已完成</div>' : ''}
@@ -941,7 +1262,7 @@
     const sync = GistSync.config();
     const asr = Speech.asrConfig();
     const num = (key, label, min, max, note = '') => `<label class="setting"><span>${label}${note ? `<small class="muted">${note}</small>` : ''}</span><input type="number" data-setting="${key}" value="${s[key]}" min="${min}" max="${max}"></label>`;
-    const decks = ['game', 'work', 'tech', 'daily', 'vocab'].map(d => `<label class="toggle"><input type="checkbox" data-deck-toggle="${d}" ${s.decks[d] ? 'checked' : ''}> ${TAGS[d].icon} ${TAGS[d].name}</label>`).join('');
+    const decks = ['travel', 'job', 'ielts', 'daily', 'vocab'].map(d => `<label class="toggle"><input type="checkbox" data-deck-toggle="${d}" ${s.decks[d] ? 'checked' : ''}> ${TAGS[d].icon} ${TAGS[d].name}</label>`).join('');
     const voiceOpts = ['<option value="">自动选择（推荐）</option>', ...Speech.voices().map(v => `<option value="${esc(v.name)}" ${v.name === s.voice ? 'selected' : ''}>${esc(v.name)} (${esc(v.lang)})</option>`)].join('');
     const appUrl = location.href.split('#')[0];
     return `<div class="page-head"><div><h2>我的</h2><p class="muted">坚持比强度更重要。</p></div></div>
@@ -1017,19 +1338,18 @@
       <section class="card">
         <h3 class="card-title">⚙️ 每日练习量</h3>
         ${num('newPerDay', '每天新语块', 1, 40, '立即生效')}
-        ${num('sayPerDay', '说出来', 1, 15, '明天生效')}
-        ${num('listenPerDay', '听说训练', 1, 15, '明天生效')}
+        ${num('listenPerDay', '听力句数', 1, 15, '明天生效')}
         ${num('chatGoal', 'AI 对话句数', 2, 30, '明天生效')}
-        <div class="setting"><span>新语块来自<small class="muted">核心词汇偏阅读，适合读技术文档</small></span><div class="chips">${decks}</div></div>
+        <div class="setting"><span>新语块来自<small class="muted">核心词汇对雅思阅读和写作有帮助</small></span><div class="chips">${decks}</div></div>
       </section>
 
       <section class="card">
         <h3 class="card-title">🔊 朗读</h3>
         ${Speech.hasTTS ? `
-        <label class="setting"><span>发音人<small class="muted">Edge 里带 Natural 的最自然</small></span><select data-setting="voice">${voiceOpts}</select></label>
+        <label class="setting"><span>发音人<small class="muted">Edge 里带 Natural 的最自然；英音、澳音也可以选来适应口音</small></span><select data-setting="voice">${voiceOpts}</select></label>
         <label class="setting"><span>语速 <b id="rate-val">${s.rate.toFixed(2)}</b></span><input type="range" data-setting="rate" min="0.5" max="1.3" step="0.05" value="${s.rate}"></label>
         <label class="setting"><span>语块自动发音</span><input type="checkbox" data-setting="autoSpeak" ${s.autoSpeak ? 'checked' : ''}></label>
-        <div class="row"><button class="btn ghost" data-say="Nice shot! Let's rotate to B and play for the retake.">试听</button></div>`
+        <div class="row"><button class="btn ghost" data-say="Hi, I'm calling about the job ad. Is the position still open?">试听</button></div>`
         : '<p class="muted">这个浏览器不支持朗读，建议用 Edge、Chrome 或 Safari。</p>'}
       </section>
 
@@ -1054,8 +1374,8 @@
       `UID:speakup-daily-${Date.now()}@speakup`,
       `DTSTAMP:${stamp}`,
       `DTSTART:${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(h)}${pad(m)}00`,
-      'DURATION:PT15M', 'RRULE:FREQ=DAILY',
-      'SUMMARY:📘 SpeakUp 练英语（15 分钟）',
+      'DURATION:PT25M', 'RRULE:FREQ=DAILY',
+      'SUMMARY:📘 SpeakUp 练英语（25 分钟）',
       `DESCRIPTION:今天的英语练习：${url}`,
       `URL:${url}`,
       'BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:该练英语啦', 'TRIGGER:PT0M', 'END:VALARM',
@@ -1120,21 +1440,56 @@
         delete S.cards['my:' + d.en];
         save(); buildDeck(); return render();
       }
-      // 说出来
-      case 'say-submit': return saySubmit(i);
-      case 'say-ref': { const u = ui.say[i] || (ui.say[i] = {}); u.result = { ai: null }; u.error = ''; return render(); }
-      case 'say-grade': markDone('say', i, d.g === '1'); return render();
-      case 'say-again': { const u = ui.say[i] || (ui.say[i] = {}); u.result = null; u.again = true; u.input = ''; u.via = ''; return render(); }
-      // 听说
+      // 听力
       case 'play': return playListen(i);
       case 'play-slow': return playListen(i, SLOW);
       case 'check': return checkListen(i);
       case 'redo': { const u = ui.listen[i] || (ui.listen[i] = {}); u.result = null; u.input = ''; u.redo = true; return render(); }
       case 'shadow': return toggleShadow(i);
       case 'extra': {
-        const more = pickItems(d.cat, 1, S.today.items[d.cat]);
-        if (!more.length) { flash('这一类今天都练过了'); return; }
-        S.today.items[d.cat].push(...more); save(); return render();
+        const more = pickItems(1, S.today.items.listen);
+        if (!more.length) { flash('今天的句子都练过了'); return; }
+        S.today.items.listen.push(...more); save(); return render();
+      }
+      // 雅思
+      case 'ielts-tab': ieltsTab = d.tab; stopMic(); drillError = ''; wError = ''; render(); return window.scrollTo(0, 0);
+      case 'speak-kind': stopMic(); S.today.speak.kind = d.kind; save(); return render();
+      case 'prep-skip': { const dr = currentDrill(); const st = dr.steps[dr.idx]; st.prepDone = true; storeDrill(dr); Speech.speak('All right. Please begin speaking now.'); return render(); }
+      case 'drill-next': case 'drill-prev': {
+        const dr = currentDrill();
+        if (d.act === 'drill-next' && !dr.steps[dr.idx].answer.trim()) { flash('先回答这道题（可以说也可以打字）'); return; }
+        stopMic();
+        dr.idx = clamp(dr.idx + (d.act === 'drill-next' ? 1 : -1), 0, dr.steps.length - 1);
+        storeDrill(dr);
+        return render();
+      }
+      case 'drill-submit': return drillSubmit();
+      case 'drill-retry': {
+        const dr = currentDrill();
+        const fresh = { ...dr, idx: 0, result: null, finished: false, steps: dr.steps.map(s => ({ part: s.part, q: s.q, card: s.card, answer: '', via: '', secs: 0 })) };
+        lastQuestion = null;
+        storeDrill(fresh);
+        return render();
+      }
+      case 'w-task': wd.task = +d.task; wd.useCustom = false; storeWd(); return render();
+      case 'w-custom': wd.useCustom = true; storeWd(); return render();
+      case 'w-another': if (wd.task === 1) wd.i1++; else wd.i2++; wd.result = null; storeWd(); return render();
+      case 'w-submit': return writeSubmit();
+      case 'w-next': if (wd.task === 1) wd.i1++; else wd.i2++; wd.text = ''; wd.result = null; wd.started = 0; wd.useCustom = false; storeWd(); render(); return window.scrollTo(0, 0);
+      case 'w-revise': wd.result = null; storeWd(); return render();
+      case 'add-test': {
+        const kind = $('#t-kind').value, raw = Math.round(+$('#t-raw').value);
+        if (!(raw >= 0 && raw <= 40) || $('#t-raw').value === '') { flash('填 0–40 之间的答对题数'); return; }
+        const band = rawToBand(kind, raw);
+        S.ielts.tests.push({ id: uid(), at: Date.now(), d: S.today.date, kind, raw, band });
+        save();
+        flash(`已记录：${kind === 'listening' ? '听力' : '阅读'} ${raw}/40 ≈ ${fmtBand(band)} 分`);
+        return render();
+      }
+      case 'del-test': {
+        const rec = S.ielts.tests.find(x => x.id === d.id);
+        if (rec && confirm('删除这条成绩？')) { rec.del = true; save(); render(); }
+        return;
       }
       // AI 陪练
       case 'chat-send': return chatSend($('#chat-input').value);
@@ -1156,7 +1511,7 @@
       }
       case 'ai-test': {
         aiTesting = true; render();
-        try { await AI.test(); flash('✅ 连接成功，可以开始 AI 陪练了'); } catch (e) { flash('❌ ' + e.message); }
+        try { await AI.test(); flash('✅ 连接成功，口语估分、写作批改和 AI 陪练都能用了'); } catch (e) { flash('❌ ' + e.message); }
         aiTesting = false; return render();
       }
       case 'asr-save': {
@@ -1192,8 +1547,9 @@
       case 'export': return downloadFile(`speakup-backup-${S.today.date}.json`, JSON.stringify(S, null, 1), 'application/json');
       case 'reset':
         if (confirm('确定清空所有学习进度吗？（建议先导出备份）') && confirm('再确认一次：真的清空？')) {
-          localStorage.removeItem(STORE); localStorage.removeItem(CHATS);
-          S = load(); buildDeck(); vq = []; ensureToday(); save(); render(); flash('已清空');
+          for (const k of [STORE, CHATS, DRILLS, WDRAFT, WLOG]) localStorage.removeItem(k);
+          S = load(); drills = {}; wd = { task: 2, i1: 0, i2: 0, text: '', custom: '', useCustom: false, started: 0, result: null };
+          buildDeck(); vq = []; ensureToday(); save(); render(); flash('已清空');
         }
         return;
       case 'close-celebrate': t.closest('.celebrate').remove(); return render();
@@ -1211,8 +1567,19 @@
   });
 
   document.addEventListener('input', e => {
-    const t = e.target;
-    if (t.dataset.input) { const box = ui[t.dataset.input]; (box[t.dataset.i] = box[t.dataset.i] || {}).input = t.value; }
+    const t = e.target, kind = t.dataset.input;
+    if (kind === 'listen') { (ui.listen[t.dataset.i] = ui.listen[t.dataset.i] || {}).input = t.value; }
+    else if (kind === 'drill' || kind === 'notes') {
+      const dr = currentDrill(); if (!dr) return;
+      const st = dr.steps[dr.idx];
+      if (kind === 'drill') { st.answer = t.value; if (!st.via) st.via = 'typed'; } else st.notes = t.value;
+      storeDrill(dr);
+    } else if (kind === 'write') {
+      wd.text = t.value;
+      if (!wd.started) wd.started = Date.now();
+      storeWd();
+      const wc = $('#wc'); if (wc) wc.textContent = wordCount(t.value);
+    } else if (kind === 'wcustom') { wd.custom = t.value; storeWd(); }
     else if (t.id === 'chat-input') chatDraft = t.value;
     else if (t.id === 'chunk-search') {
       chunkSearch = t.value;
@@ -1221,6 +1588,9 @@
       const s = $('#chunk-search'); s.focus(); s.setSelectionRange(pos, pos);
     } else if (t.dataset.setting === 'rate') $('#rate-val').textContent = (+t.value).toFixed(2);
   });
+
+  // 写作计时
+  setInterval(() => { const el = $('#wtime'); if (el && wd.started && !wd.result) el.textContent = fmtSecs((Date.now() - wd.started) / 1000); }, 1000);
 
   document.addEventListener('change', e => {
     const t = e.target;
@@ -1241,10 +1611,12 @@
     if (t.type === 'checkbox') S.settings[k] = t.checked;
     else if (t.type === 'number') S.settings[k] = clamp(Math.round(+t.value) || 1, +t.min, +t.max);
     else if (t.type === 'range') S.settings[k] = +t.value;
+    else if (k === 'target') S.settings[k] = +t.value;
     else S.settings[k] = t.value;
     S.settings.t = Date.now();
     save();
     if (k === 'newPerDay') vq = [];
+    if (k === 'examDate' || k === 'target') render();
     flash('已保存');
   });
 
@@ -1256,7 +1628,6 @@
       return;
     }
     if (t.id === 'chat-input' && e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); chatSend(t.value); return; }
-    if (d.input === 'say' && e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); saySubmit(+d.i); return; }
     if (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) {
       if (t.id && t.id.startsWith('cw-') && e.key === 'Enter' && addCustom($('#cw-en').value, $('#cw-zh').value, $('#cw-ex').value)) render();
       return;
@@ -1295,6 +1666,7 @@
 
   // ================= 启动 =================
   buildDeck();
+  if (!S.today || S.v !== 3) save();
   render();
   if (GistSync.ready()) { setSync('idle'); pull(); }
 })();

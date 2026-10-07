@@ -59,9 +59,27 @@ window.AI = (() => {
     grade: 'Respond with a json object exactly like: {"verdict": "great" | "ok" | "miss", "better": "...", "explain_zh": "..."}',
     review: 'Respond with a json object exactly like: {"score": 1-5, "summary_zh": "...", "fixes": [{"you": "...", "better": "...", "why_zh": "..."}], "chunks": [{"en": "...", "zh": "..."}]}',
   };
-  const SCHEMAS = { tutor: TUTOR_SCHEMA, grade: GRADE_SCHEMA, review: REVIEW_SCHEMA };
+  // 雅思分数：1–9，以 0.5 为单位
+  const BAND = { type: 'number', enum: Array.from({ length: 17 }, (_, i) => 1 + i / 2) };
+  const SPEAK_SCHEMA = obj({
+    fc: BAND, lr: BAND, gra: BAND, overall: BAND,
+    summary_zh: str,
+    pron_note_zh: str,
+    items: { type: 'array', items: obj({ q: str, better: str, tips_zh: str }) },
+    chunks: { type: 'array', items: obj({ en: str, zh: str }) },
+  });
+  const WRITE_SCHEMA = obj({
+    ta: BAND, cc: BAND, lr: BAND, gra: BAND, overall: BAND,
+    summary_zh: str,
+    corrections: { type: 'array', items: obj({ original: str, better: str, why_zh: str }) },
+    improved: str,
+    next_step_zh: str,
+  });
+  FORMAT_HINTS.speak = 'Respond with a json object exactly like: {"fc": 5.5, "lr": 5, "gra": 5, "overall": 5.5, "summary_zh": "...", "pron_note_zh": "...", "items": [{"q": "...", "better": "...", "tips_zh": "..."}], "chunks": [{"en": "...", "zh": "..."}]}. Band numbers are whole or half bands from 1 to 9.';
+  FORMAT_HINTS.write = 'Respond with a json object exactly like: {"ta": 5.5, "cc": 5.5, "lr": 5, "gra": 5, "overall": 5.5, "summary_zh": "...", "corrections": [{"original": "...", "better": "...", "why_zh": "..."}], "improved": "...", "next_step_zh": "..."}. Band numbers are whole or half bands from 1 to 9.';
+  const SCHEMAS = { tutor: TUTOR_SCHEMA, grade: GRADE_SCHEMA, review: REVIEW_SCHEMA, speak: SPEAK_SCHEMA, write: WRITE_SCHEMA };
 
-  const LEARNER = 'The learner is Chinese. Their English is around CET-4 / B1: they read reasonably well but freeze when speaking. Their goals: chat naturally with foreign players in FPS games (CS2, Valorant, Apex), and later work at an international company as an embedded software engineer.';
+  const LEARNER = 'The learner is Chinese. Their English is around CET-4 / B1: they read reasonably well but freeze when speaking. Their goals: get an overall IELTS General Training band of 5.5, then go on a working holiday in New Zealand or Australia — travelling and doing casual jobs such as café, farm and hospitality work.';
 
   function tutorSystem(sc) {
     return `You are an English conversation partner. ${LEARNER}
@@ -78,10 +96,10 @@ Stay in character and keep the conversation going:
 - The learner's messages may come from speech recognition: ignore capitalization and punctuation. The recognizer often mishears their accent as similar-sounding words (e.g. "response" for "reproduce", "ball" for "board"); when a sound-alike explains an odd word, understand what they meant and reply to that.
 
 ## Coaching (outside the role-play, in the separate fields)
-- correction: if the learner's last message has a mistake or sounds unnatural, set needed=true, put a natural version of their whole message in "better" (keep their meaning and as much of their wording as already works), a Simplified Chinese translation of it in "better_zh", and the single most useful point in "explain_zh" (Simplified Chinese, 1–2 short sentences). If it's already natural for this context, set needed=false and leave the three strings empty. Don't correct things that are normal in casual speech or game chat.
+- correction: if the learner's last message has a mistake or sounds unnatural, set needed=true, put a natural version of their whole message in "better" (keep their meaning and as much of their wording as already works), a Simplified Chinese translation of it in "better_zh", and the single most useful point in "explain_zh" (Simplified Chinese, 1–2 short sentences). If it's already natural for this context, set needed=false and leave the three strings empty. Don't correct things that are normal in casual speech.
 - A misheard sound-alike is not a grammar mistake, so don't "correct" it as one. If it points to a sound they should say more clearly, you may mention that in "explain_zh" (e.g. 「识别成了 ball，board 结尾的 d 要发出来」).
 - If the learner writes Chinese (or mixes Chinese in), they didn't know how to say it: put the English in "better" (needed=true) and reply in character as if they had said it in English.
-- hint_zh: a short suggestion in Simplified Chinese of what they could say next, including an English example, e.g. 「可以问他常用什么枪：What gun do you usually play?」
+- hint_zh: a short suggestion in Simplified Chinese of what they could say next, including an English example, e.g. 「可以问房租包不包水电：Are bills included?」
 - reply: your in-character line, English only.
 
 Latency-sensitive; begin your answer immediately.`;
@@ -89,7 +107,7 @@ Latency-sensitive; begin your answer immediately.`;
 
   const GRADE_SYSTEM = `You are an English speaking coach. ${LEARNER}
 
-The learner gets a situation described in Chinese and tries to say it in English. Judge whether their English would work in that real situation: would a native speaker understand it, and does it sound natural? Small grammar slips that don't hurt understanding are fine in casual contexts (games, chat). Ignore capitalization and punctuation. The reference answer is only one possibility — other natural answers are equally good.
+The learner gets a situation described in Chinese and tries to say it in English. Judge whether their English would work in that real situation: would a native speaker understand it, and does it sound natural? Small grammar slips that don't hurt understanding are fine in casual contexts. Ignore capitalization and punctuation. The reference answer is only one possibility — other natural answers are equally good.
 
 Spoken answers go through speech recognition, which often mishears a Chinese accent as similar-sounding words (e.g. "response" for "reproduce", "ball" for "board", "allowed" for "he's low"). For a spoken answer, when a sound-alike explains an odd word, assume the learner said the intended word and judge the rest of their English on that basis; don't call the meaning wrong because of recognition errors. If a misheard word suggests a sound they should pronounce more clearly, add a short pronunciation tip to explain_zh (e.g. 「识别成了 ball，board 结尾的 d 要发出来」).
 
@@ -105,6 +123,28 @@ Fields:
 - summary_zh: 2–3 encouraging, specific sentences in Simplified Chinese: what went well, and the one habit to work on next.
 - fixes: up to 5 of the learner's most useful-to-fix sentences — "you" is what they wrote, "better" is a natural version, "why_zh" a short reason in Simplified Chinese. Skip trivial typos.
 - chunks: up to 5 reusable expressions from this conversation (or ones the learner needed) worth memorizing, as {en, zh}.`;
+
+  const SPEAK_SYSTEM = `You are an experienced IELTS Speaking examiner and coach. ${LEARNER}
+
+You'll get the questions and the learner's answers, with how many seconds they spoke. Answers are speech-recognition transcripts (or typed): ignore punctuation and capitalization. Speech recognition often mishears a Chinese accent as similar-sounding words (e.g. "ball" for "board"); treat those as possible pronunciation issues, not grammar or vocabulary errors.
+
+Estimate bands for Fluency and Coherence (fc), Lexical Resource (lr) and Grammatical Range and Accuracy (gra), following the public IELTS Speaking band descriptors, in whole or half bands. Be realistic and consistent — an honest estimate is what helps the learner plan. Very short answers (a few words in Part 1, under a minute in Part 2) limit Fluency and Coherence. You can't hear the audio, so don't score Pronunciation: overall is the average of fc, lr and gra, rounded to the nearest half band.
+
+Fields:
+- summary_zh: 2–3 sentences in Simplified Chinese — where they are now, and the single change that would most likely gain half a band.
+- pron_note_zh: pronunciation hints suggested by likely misrecognitions, in Simplified Chinese; empty string if none.
+- items: one per question, in order. q = the question; better = a natural answer at about band 6.5 that keeps the learner's own ideas (2–3 sentences for Part 1 and Part 3, about 150–200 words for Part 2), using vocabulary a B1–B2 learner can realistically reuse; tips_zh = the most useful fix for that answer, one or two sentences in Simplified Chinese.
+- chunks: up to 5 useful expressions for these topics, as {en, zh}.`;
+
+  const WRITE_SYSTEM = `You are an experienced IELTS Writing examiner and coach for the General Training test. ${LEARNER}
+
+Score the response with the public IELTS Writing band descriptors, in whole or half bands: ta = Task Achievement (Task 1) or Task Response (Task 2), cc = Coherence and Cohesion, lr = Lexical Resource, gra = Grammatical Range and Accuracy; overall = their average rounded to the nearest half band. Be realistic and consistent. Responses under the minimum length (150 words for Task 1, 250 for Task 2) lose marks in ta. For a Task 1 letter, check that all three bullet points are covered and that the tone suits the reader (formal, semi-formal or informal).
+
+Fields:
+- summary_zh: 2–3 sentences in Simplified Chinese — where they are now and what is holding the score back.
+- corrections: up to 8 of the most important errors, in the order they appear: original = the exact snippet from the response, better = the corrected version, why_zh = a short reason in Simplified Chinese.
+- improved: the whole response rewritten at about band 6.5, keeping the learner's ideas and structure so they can compare paragraph by paragraph.
+- next_step_zh: one concrete thing to practise next, in Simplified Chinese.`;
 
   // ---------- 调用 ----------
   let claudeLoading = null;
@@ -227,11 +267,33 @@ Fields:
     return call('review', REVIEW_SYSTEM, [{ role: 'user', content }], 'medium').then(r => r.data);
   }
 
+  /**
+   * 雅思口语评分。steps: [{ part: 1|2|3, q, card?: {title, bullets, why}, answer, secs }]
+   */
+  function speakScore(steps, label) {
+    const lines = steps.map((s, i) => {
+      const q = s.part === 2 && s.card
+        ? `Cue card: ${s.card.title} You should say: ${s.card.bullets.join('; ')}; ${s.card.why}`
+        : s.q;
+      const how = s.via === 'typed' ? 'typed' : `spoken, ${Math.round(s.secs || 0)} seconds`;
+      return `Q${i + 1} [Part ${s.part}] ${q}\nAnswer (${how}): ${s.answer || '(no answer)'}`;
+    }).join('\n\n');
+    return call('speak', SPEAK_SYSTEM, [{ role: 'user', content: `Practice: ${label}\n\n${lines}` }], 'medium').then(r => r.data);
+  }
+
+  /** 雅思 G 类写作评分。task: 1|2 */
+  function writeScore(task, prompt, text) {
+    const words = (String(text).match(/[A-Za-z0-9'’-]+/g) || []).length;
+    const kind = task === 1 ? 'General Training Writing Task 1 (letter, at least 150 words)' : 'General Training Writing Task 2 (essay, at least 250 words)';
+    const content = `Task: ${kind}\nPrompt: ${prompt}\nWord count: ${words}\n\nResponse:\n${text}`;
+    return call('write', WRITE_SYSTEM, [{ role: 'user', content }], 'medium').then(r => r.data);
+  }
+
   async function test() {
     const r = await grade('打招呼', 'Hi!', 'Hello!');
     if (!r || !r.verdict) throw new Error('返回内容不完整');
     return r;
   }
 
-  return { PROVIDERS, config, saveConfig, ready, startChat, chatTurn, grade, review, test, loadClaude };
+  return { PROVIDERS, config, saveConfig, ready, startChat, chatTurn, grade, review, speakScore, writeScore, test, loadClaude };
 })();

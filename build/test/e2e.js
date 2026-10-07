@@ -1,4 +1,4 @@
-// 端到端测试：在 jsdom 里加载真实页面，模拟用户点击；AI 与 GitHub 接口用本地假服务代替。
+// 端到端测试：在 jsdom 里加载真实页面，模拟用户点击；AI、GitHub、语音识别都用本地假服务代替。
 // 运行：node build/test/e2e.js
 const fs = require('fs');
 const path = require('path');
@@ -6,26 +6,39 @@ const { JSDOM } = require('jsdom');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const read = f => fs.readFileSync(path.join(ROOT, f), 'utf8');
-const SCRIPTS = ['data/chunks.js', 'data/words.js', 'data/practice.js', 'js/speech.js', 'js/ai.js', 'js/sync.js', 'js/app.js'];
+const SCRIPTS = ['data/chunks.js', 'data/words.js', 'data/practice.js', 'data/ielts.js', 'js/speech.js', 'js/ai.js', 'js/sync.js', 'js/app.js'];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-let failures = 0;
-const ok = (cond, msg) => { console.log((cond ? '  ok   ' : '  FAIL ') + msg); if (!cond) failures++; };
+let failures = 0, passes = 0;
+const ok = (cond, msg) => { console.log((cond ? '  ok   ' : '  FAIL ') + msg); if (cond) passes++; else failures++; };
 
 // ---------- 假服务 ----------
-const gists = {};          // 模拟 GitHub Gist
+const gists = {};
 const calls = [];
 let claudeReplies = 0;
-let siliconText = '<|en|><|NEUTRAL|>Two on B, one behind the car.';
+const siliconText = '<|en|><|NEUTRAL|>I would say my hometown is quite small.';
 const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
+
+function fakeDeepSeek(body) {
+  const sys = body.messages[0].content;
+  const user = body.messages[body.messages.length - 1].content;
+  let content;
+  if (sys.includes('reviewing a practice conversation')) content = { score: 4, summary_zh: '整体不错，敢开口。', fixes: [{ you: 'i go there', better: "I'm going there.", why_zh: '要用进行时' }], chunks: [{ en: 'Are bills included?', zh: '包水电网吗？' }] };
+  else if (sys.includes('IELTS Speaking examiner')) {
+    const n = (user.match(/^Q\d+ /gm) || []).length;
+    content = { fc: 5.5, lr: 5, gra: 5, overall: 5.5, summary_zh: '能说下去，但句子偏短。', pron_note_zh: '', items: Array.from({ length: n }, (_, k) => ({ q: 'Q' + (k + 1), better: 'A natural band 6.5 answer.', tips_zh: '多给一个例子' })), chunks: [{ en: 'broaden my horizons', zh: '开阔眼界' }] };
+  } else if (sys.includes('IELTS Writing examiner')) content = { ta: 5.5, cc: 6, lr: 5.5, gra: 5, overall: 5.5, summary_zh: '结构清楚，语法错误较多。', corrections: [{ original: 'peoples', better: 'people', why_zh: 'people 本身是复数' }], improved: 'An improved essay at band 6.5.', next_step_zh: '练习复合句' };
+  else if (sys.includes('situation described in Chinese')) content = { verdict: 'great', better: 'Hello!', explain_zh: '很好' };
+  else content = { reply: 'Sounds good. How long are you planning to stay?', correction: { needed: true, better: "I'm staying for a year.", better_zh: '我待一年。', explain_zh: '用进行时表示计划' }, hint_zh: '可以说你的计划：I want to work on a farm.' };
+  return json({ choices: [{ message: { content: JSON.stringify(content) } }] });
+}
 
 async function fakeFetch(url, init = {}) {
   url = String(url);
   const method = (init.method || 'GET').toUpperCase();
   let raw = init.body;
   if (raw && typeof raw.append === 'function' && typeof raw.get === 'function') {
-    const form = { model: raw.get('model'), file: raw.get('file') };
-    calls.push({ url, method, body: form, headers: init.headers });
+    calls.push({ url, method, body: { model: raw.get('model'), file: raw.get('file') }, headers: init.headers });
     if (url.startsWith('https://api.siliconflow.cn/v1/audio/transcriptions')) {
       if (new Headers(init.headers).get('authorization') !== 'Bearer sk-sf-good') return json({ code: 20015, message: 'Invalid token' }, 401);
       return json({ text: siliconText });
@@ -33,17 +46,9 @@ async function fakeFetch(url, init = {}) {
     throw new Error('unexpected form upload ' + url);
   }
   if (raw && typeof raw !== 'string') raw = typeof raw.getReader === 'function' ? await new Response(raw).text() : Buffer.from(raw).toString('utf8');
-  let body = null;
-  try { body = raw ? JSON.parse(raw) : null; } catch (e) { console.log('  DEBUG unparsable body for', url, typeof init.body, String(raw).slice(0, 80)); throw e; }
+  const body = raw ? JSON.parse(raw) : null;
   calls.push({ url, method, body, headers: init.headers });
-  if (url.startsWith('https://api.deepseek.com')) {
-    const sys = body.messages[0].content;
-    let content;
-    if (sys.includes('reviewing a practice conversation')) content = { score: 4, summary_zh: '整体不错，敢开口。', fixes: [{ you: 'i go B', better: "I'm going B.", why_zh: '要用进行时' }], chunks: [{ en: 'Good call', zh: '报得好' }] };
-    else if (sys.includes('situation described in Chinese')) content = { verdict: 'ok', better: 'Two on B, one behind the car.', explain_zh: '报点更短更好' };
-    else content = { reply: 'Nice! What gun do you usually use?', correction: { needed: true, better: 'I usually play the AK.', better_zh: '我一般用 AK。', explain_zh: '习惯用一般现在时' }, hint_zh: '可以说你喜欢的枪：I love the AWP.' };
-    return json({ choices: [{ message: { content: JSON.stringify(content) } }] });
-  }
+  if (url.startsWith('https://api.deepseek.com')) return fakeDeepSeek(body);
   if (url.startsWith('https://api.anthropic.com')) {
     if (new Headers(init.headers).get('x-api-key') === 'sk-ant-nocredit') return json({ type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.' }, request_id: 'req_x' }, 400);
     claudeReplies++;
@@ -77,21 +82,22 @@ function openDevice(storage) {
   w.confirm = () => true;
   w.scrollTo = () => {};
   w.Element.prototype.scrollIntoView = () => {};
-  w.speechSynthesis = { speak(u) { setTimeout(() => u.onend && u.onend(), 0); }, cancel() {}, getVoices: () => [{ name: 'Aria Natural', lang: 'en-US' }], addEventListener() {} };
+  w.spoken = [];
+  w.speechSynthesis = { speak(u) { w.spoken.push(u.text); setTimeout(() => u.onend && u.onend(), 0); }, cancel() {}, getVoices: () => [{ name: 'Aria Natural', lang: 'en-US' }], addEventListener() {} };
   w.SpeechSynthesisUtterance = class { constructor(t) { this.text = t; } };
   w.nextSpeech = '';
   w.asrMode = 'normal';     // normal | interim-only | drop-then-continue
   w.asrStarts = 0;
   w.webkitSpeechRecognition = class {
     start() {
-      const n = ++w.asrStarts;
+      ++w.asrStarts;
       setTimeout(() => {
         this.onstart && this.onstart();
         const emit = (t, fin) => { const r = [{ transcript: t }]; r.isFinal = fin; this.onresult && this.onresult({ resultIndex: 0, results: [r] }); };
-        if (w.asrMode === 'interim-only') emit(w.nextSpeech, false);            // 用户按停止时还没确认
+        if (w.asrMode === 'interim-only') emit(w.nextSpeech, false);
         else if (w.asrMode === 'drop-then-continue') {
-          if (w.asrStarts === w.asrFirst) { emit("I can't reproduce", true); setTimeout(() => this.onend && this.onend(), 5); }   // 停顿后浏览器自己结束
-          else emit('the bug on my board', true);
+          if (w.asrStarts === w.asrFirst) { emit('I think young people', true); setTimeout(() => this.onend && this.onend(), 5); }
+          else emit('should travel more', true);
         } else emit(w.nextSpeech, true);
         if (!this.continuous) this.onend && this.onend();
       }, 0);
@@ -109,227 +115,228 @@ function openDevice(storage) {
   const $ = s => w.document.querySelector(s);
   const $$ = s => [...w.document.querySelectorAll(s)];
   const click = el => { if (!el) throw new Error('element not found'); el.click(); };
-  const type = (el, v) => { el.value = v; el.dispatchEvent(new w.Event('input', { bubbles: true })); };
+  const type = (el, v) => { if (!el) throw new Error('input not found'); el.value = v; el.dispatchEvent(new w.Event('input', { bubbles: true })); };
   const change = (el, v) => { if (typeof v === 'boolean') el.checked = v; else el.value = v; el.dispatchEvent(new w.Event('change', { bubbles: true })); };
   const key = (k, target) => (target || w.document.body).dispatchEvent(new w.KeyboardEvent('keydown', { key: k, bubbles: true }));
   const nav = v => click($(`#nav button[data-view="${v}"]`));
+  const act = (a, extra = '') => click($(`[data-act="${a}"]${extra}`));
   const text = () => $('#app').textContent;
   const state = () => JSON.parse(w.localStorage.getItem('speakup.v2'));
-  return { dom, w, $, $$, click, type, change, key, nav, text, state };
+  const drillBox = () => $('[data-input="drill"]');
+  return { dom, w, $, $$, click, type, change, key, nav, act, text, state, drillBox };
+}
+
+// 把当前口语练习一路答完（打字）
+async function answerDrill(D, answer = 'I think it is quite interesting because I like it a lot.') {
+  for (let guard = 0; guard < 12; guard++) {
+    if (D.$('[data-act="prep-skip"]')) D.act('prep-skip');
+    D.type(D.drillBox(), answer);
+    if (D.$('[data-act="drill-next"]')) D.act('drill-next');
+    else { D.act('drill-submit'); await sleep(30); return; }
+  }
 }
 
 (async () => {
-  console.log('\n[设备 1：电脑]');
+  console.log('\n[首页]');
   const A = openDevice();
-  ok(A.text().includes('今日练习') && A.$$('.task').length === 4, '首页显示 4 项练习');
-  ok(A.$$('.banner').length === 2, '首页提示设置 AI 和同步');
+  ok(A.$$('.task-name').map(e => e.textContent.replace('✓', '')).join() === '语块记忆,听力,雅思口语,AI 陪练', '首页 4 项：语块 / 听力 / 雅思口语 / AI 陪练');
+  ok(A.$('.banner.goal') && A.text().includes('雅思 G 类目标 5.5'), '首页显示雅思目标');
+  ok(A.$$('#nav button').map(b => b.dataset.view).join() === 'home,chunks,listen,ielts,chat,me', '导航：今日 语块 听力 雅思 AI陪练 我的');
 
-  // 语块
+  console.log('\n[语块]');
   A.nav('chunks');
-  ok(A.text().includes('新语块 8'), '语块：今天 8 个新语块');
-  let n = 0, forgot = false;
-  while (!A.text().includes('今天的语块完成了') && n < 40) {
-    A.key(' ');
-    if (!forgot) { A.key('1'); forgot = true; } else A.key('3');
-    n++;
-  }
-  ok(n === 9, `语块：${n} 次评分后完成（8 新 + 1 次忘记重来）`);
+  ok(A.text().includes('新语块 8'), '今天 8 个新语块');
+  let n = 0;
+  while (!A.text().includes('今天的语块完成了') && n < 40) { A.key(' '); A.key('3'); n++; }
   const keys = Object.keys(A.state().cards);
-  ok(keys.length === 8 && ['g:', 'w:', 'd:', 't:'].every(p => keys.some(k => k.startsWith(p))), '新语块在游戏/职场/日常/技术之间轮换');
+  ok(n === 8 && ['tr:', 'ie:', 'jb:', 'd:', 'v:'].every(p => keys.some(k => k.startsWith(p))), '新语块在旅行/雅思/打工/日常/词汇之间轮换');
+  ok(!keys.some(k => /^[gwt]:/.test(k)), '没有游戏/外企/技术语块');
 
-  // 说出来（未设置 AI）
-  A.nav('say');
-  const sayIds = A.$$('[data-input="say"]').map(e => e.dataset.i);
-  ok(sayIds.length === 5, '说出来：5 道题');
-  for (const [k, i] of sayIds.entries()) {
-    A.type(A.$(`[data-input="say"][data-i="${i}"]`), 'Two on B');
-    A.click(A.$(`[data-act="say-submit"][data-i="${i}"]`));
-    ok(k > 0 || A.text().includes('参考说法'), '说出来：没设置 AI 时显示参考说法');
-    A.click(A.$(`[data-act="say-grade"][data-i="${i}"][data-g="${k === 0 ? 0 : 1}"]`));
-  }
-  ok(A.text().includes('今日「说出来」已完成'), '说出来：完成');
-
-  // 听说
+  console.log('\n[听力]');
   A.nav('listen');
   const lIds = A.$$('[data-input="listen"]').map(e => +e.dataset.i);
+  ok(lIds.length === 5, '今天 5 句');
+  A.click(A.$(`[data-act="play"][data-i="${lIds[0]}"]`));
+  ok(A.w.spoken.pop().includes('W, H, I, T'), '拼写题会把字母一个个读出来');
   const LISTEN = A.w.LISTEN;
-  lIds.forEach((i, k) => {
-    const input = A.$(`[data-input="listen"][data-i="${i}"]`);
-    A.type(input, k === 0 ? LISTEN[i][0].toUpperCase().replace(/[.,?!]/g, '') : LISTEN[i][0].split(' ').slice(0, -2).join(' ') + ' blah');
+  lIds.forEach(i => { A.type(A.$(`[data-input="listen"][data-i="${i}"]`), LISTEN[i][0].toLowerCase()); A.click(A.$(`[data-act="check"][data-i="${i}"]`)); });
+  ok(A.$$('.score.perfect').length === 5 && A.text().includes('今日听力已完成'), '5 句听写全对 → 听力完成');
+  for (let k = 0; k < 3; k++) A.act('extra');
+  const added = A.$$('[data-input="listen"]').map(e => +e.dataset.i);
+  const answers = { 'The rent is $185 a week.': 'the rent is 185 a week', 'The phone number is 021 384 5567.': 'The phone number is 0213845567' };
+  let numberCases = 0;
+  for (const i of added) {
+    const want = answers[LISTEN[i][0]];
+    if (!want) continue;
+    numberCases++;
+    A.type(A.$(`[data-input="listen"][data-i="${i}"]`), want);
     A.click(A.$(`[data-act="check"][data-i="${i}"]`));
-    if (k === 0) ok(A.text().includes('听写全对'), '听写：忽略大小写和标点');
-    if (k === 1) ok(A.$('.miss') && A.$('.extra'), '听写：标出漏写和多写的词');
-  });
-  ok(A.text().includes('今日「听说训练」已完成') && A.text().includes('跟读'), '听说：完成，并出现跟读步骤');
+    ok(A.$(`#listen-${i} .score.perfect`), `数字写法不同也算对：「${want}」`);
+  }
+  ok(numberCases === 2, '加练里出现了价格和电话号码题');
 
-  // AI 陪练：先设置 DeepSeek
+  console.log('\n[雅思口语：没设置 AI]');
+  A.nav('ielts');
+  ok(A.$$('.tab').length === 4 && A.text().includes('今日口语'), '雅思页有 4 个标签');
+  A.act('speak-kind', '[data-kind="p1"]');
+  ok(A.text().includes('Part 1') && A.text().includes('第 1 / 3 题'), 'Part 1 一组 3 题');
+  ok(A.w.spoken.pop().endsWith('?'), '题目会像考官一样读出来');
+  A.act('drill-next');
+  ok(A.$('#flash').textContent.includes('先回答'), '没回答不能跳到下一题');
+  await answerDrill(A);
+  ok(A.text().includes('设置 AI 后可以自动估分') && A.state().today.speak.done, '没有 AI 也能完成今日口语');
+
+  console.log('\n[AI 设置 + 陪练]');
   A.nav('chat');
-  ok(A.text().includes('1 分钟英语独白'), 'AI 陪练：未设置 AI 时给出独白练习');
+  ok(A.$('.cue') && A.text().includes('1 分钟英语独白'), '没设置 AI 时：用 Part 2 话题卡做独白');
   A.nav('me');
   A.change(A.$('#ai-provider'), 'deepseek');
   A.$('#ai-key').value = 'sk-test';
-  A.click(A.$('[data-act="ai-save"]'));
-  ok(A.w.AI.ready(), 'AI 设置：保存 DeepSeek key');
-  A.click(A.$('[data-act="ai-test"]'));
-  await sleep(20);
-  ok(A.$('#flash').textContent.includes('连接成功'), 'AI 设置：测试连接成功');
-
+  A.act('ai-save');
+  A.act('ai-test'); await sleep(20);
+  ok(A.w.AI.ready() && A.$('#flash').textContent.includes('连接成功'), 'DeepSeek 设置并测试成功');
   A.nav('chat');
-  ok(A.$('.msg.ai') && A.text().includes('🎯'), 'AI 陪练：显示场景和开场白');
-  for (let t = 0; t < 6; t++) {
-    A.type(A.$('#chat-input'), t === 0 ? 'i usually play AK' : 'I think we go B');
-    A.click(A.$('[data-act="chat-send"]'));
-    await sleep(20);
-  }
-  const lastCall = calls.filter(c => c.url.includes('deepseek')).pop();
-  ok(lastCall.body.response_format.type === 'json_object' && lastCall.body.messages.length === 1 + 2 + 11, 'AI 陪练：每轮都带着完整对话历史');
-  ok(A.$$('.msg.me').length === 6 && A.$('.fix') && A.$('.fix').textContent.includes('I usually play the AK.'), 'AI 陪练：每句话下面有更地道的说法');
-  ok(A.$('.hint-chip'), 'AI 陪练：给出下一句提示');
-
-  // 语音输入 + 说完自动发送
-  A.w.nextSpeech = 'let us rotate';
-  A.click(A.$('[data-act="mic"][data-kind="chat"]'));
-  await sleep(5);
-  A.click(A.$('[data-act="mic"][data-kind="chat"]'));
-  await sleep(40);
-  ok(A.$$('.msg.me').length === 7 && A.$$('.msg.me').pop().textContent.includes('let us rotate'), 'AI 陪练：语音识别后自动发送');
-
+  ok(A.text().includes('🎯') && A.w.SCENARIOS.every(s => s.tag !== 'game'), '陪练场景是打工度假场景');
+  for (let t = 0; t < 6; t++) { A.type(A.$('#chat-input'), 'I want to stay for one year'); A.act('chat-send'); await sleep(20); }
+  ok(A.$$('.msg.me').length === 6 && A.$('.fix'), '6 句对话，每句有纠正');
+  const sysPrompt = calls.filter(c => c.url.includes('deepseek')).pop().body.messages[0].content;
+  ok(sysPrompt.includes('IELTS') && sysPrompt.includes('working holiday') && !/CS2|embedded/.test(sysPrompt), 'AI 知道你的目标是雅思 + 打工度假');
   await sleep(500);
-  ok(A.state().history[A.state().today.date].complete === true, '4 项全部完成 → 今日打卡');
-  ok(!!A.w.document.querySelector('.celebrate'), '打卡庆祝弹窗');
-  A.click(A.$('[data-act="close-celebrate"]'));
+  ok(A.state().history[A.state().today.date].complete === true && A.w.document.querySelector('.celebrate'), '4 项完成 → 打卡');
+  A.act('close-celebrate');
 
-  // 点评 + 收藏
-  A.click(A.$('[data-act="chat-review"]'));
-  await sleep(20);
-  ok(A.text().includes('本次点评') && A.text().includes('Good call'), 'AI 点评：显示值得改的句子和语块');
-  A.click(A.$('.review [data-act="star"]'));
-  ok(A.state().custom.some(c => c.en === 'Good call'), 'AI 点评：一键收藏语块');
+  console.log('\n[雅思口语：AI 评分]');
+  A.nav('ielts');
+  A.act('speak-kind', '[data-kind="p2"]');
+  ok(A.$('.cue') && A.$('#prep-left') && A.$('[data-act="drill-submit"]').disabled, 'Part 2：先显示话题卡和 1 分钟准备倒计时');
+  A.type(A.$('[data-input="notes"]'), 'Queenstown / friends / bungee');
+  A.act('prep-skip');
+  ok(A.drillBox() && A.text().includes('Queenstown'), '跳过准备后开始答题，笔记还在');
+  A.type(A.drillBox(), 'I am going to talk about a trip to Queenstown with my friends. '.repeat(5));
+  A.act('drill-submit'); await sleep(30);
+  ok(A.$$('.band').length === 4 && A.text().includes('5.5') && A.text().includes('6.5 分参考'), '显示估分、四项分数和 6.5 分参考回答');
+  const spReq = calls.filter(c => c.url.includes('deepseek')).pop().body.messages[1].content;
+  ok(spReq.includes('Cue card') && spReq.includes('You should say'), '评分时把话题卡发给 AI');
+  A.click(A.$('[data-act="star"]'));
+  ok(A.state().custom.some(c => c.en === 'broaden my horizons'), '评分里的表达可以一键收藏');
 
-  // 说出来 + AI 批改
-  A.click(A.$('[data-act="extra"]') || A.$('body'));
-  A.nav('say');
-  A.click(A.$('[data-act="extra"][data-cat="say"]'));
-  const extra = A.$$('[data-input="say"]').pop();
-  A.type(extra, 'two people B');
-  A.click(A.$(`[data-act="say-submit"][data-i="${extra.dataset.i}"]`));
-  await sleep(20);
-  ok(A.text().includes('能听懂，还可以更自然') && A.text().includes('报点更短更好'), '说出来：AI 批改显示结果和解释');
-
-  // 语音识别：三种“读不到”的情况
-  console.log('\n[语音识别]');
-  const sayMic = () => A.$$('[data-act="mic"][data-kind="say"]').pop();
-  const sayBox = () => A.$$('[data-input="say"]').pop();
-  A.click(A.$('[data-act="extra"][data-cat="say"]'));
-  A.w.nextSpeech = 'two on B';
-  A.click(sayMic());
-  ok(sayMic().textContent.includes('准备中'), '点麦克风后先显示“准备中…先别说”');
+  // 语音回答：三种“读不到”的情况都不丢字
+  A.act('drill-retry');
+  A.act('speak-kind', '[data-kind="p3"]');
+  const drillMic = () => A.$('[data-act="mic"][data-kind="drill"]');
+  A.w.asrMode = 'interim-only'; A.w.nextSpeech = 'in my opinion people travel to relax';
+  A.click(drillMic());
+  ok(drillMic().textContent.includes('准备中'), '点麦克风先显示“准备中…先别说”');
   await sleep(10);
-  ok(A.$('.btn.rec .lvl') && sayMic().textContent.includes('说完了'), '开始听之后按钮变红，带音量条');
-  A.click(sayMic()); await sleep(20);
-  ok(sayBox().value === 'two on B', '正常识别：文字填进输入框');
-  A.click(A.$(`[data-act="say-submit"][data-i="${sayBox().dataset.i}"]`)); await sleep(20);
-  ok(calls.filter(c => c.url.includes('deepseek')).pop().body.messages[1].content.includes('spoken aloud'), '批改时告诉 AI 这句是语音识别的');
-
-  A.click(A.$('[data-act="extra"][data-cat="say"]'));
-  A.w.asrMode = 'interim-only'; A.w.nextSpeech = 'he is low one shot';
-  A.click(sayMic()); await sleep(10); A.click(sayMic()); await sleep(20);
-  ok(sayBox().value === 'he is low one shot', '按“说完了”时最后一段没确认，也不会被吃掉');
-
-  A.click(A.$('[data-act="extra"][data-cat="say"]'));
+  ok(A.$('.btn.rec .lvl'), '开始听之后按钮变红，带音量条');
+  A.click(drillMic()); await sleep(20);
+  ok(A.drillBox().value === 'in my opinion people travel to relax', '按“说完了”时最后一段没确认也不丢');
+  const stored = JSON.parse(A.w.localStorage.getItem('speakup.drills'));
+  const cur = Object.values(stored).find(d => d.kind === 'p3');
+  ok(cur.steps[0].via === 'voice' && cur.steps[0].secs > 0, '记录了语音作答和说话时长');
+  A.act('drill-next');
   A.w.asrMode = 'drop-then-continue'; A.w.asrFirst = A.w.asrStarts + 1;
-  A.click(sayMic()); await sleep(40);
-  ok(sayMic() && sayMic().textContent.includes('说完了'), '说话停顿、浏览器自己停了之后会自动接着听');
-  A.click(sayMic()); await sleep(20);
-  ok(sayBox().value === "I can't reproduce the bug on my board", '停顿前后两段话都保留：' + sayBox().value);
+  A.click(drillMic()); await sleep(40);
+  ok(drillMic().textContent.includes('说完了'), '停顿后浏览器自己停了，会自动接着听');
+  A.click(drillMic()); await sleep(20);
+  ok(A.drillBox().value === 'I think young people should travel more', '停顿前后两段都保留');
   A.w.asrMode = 'normal';
 
-  // SenseVoice
+  console.log('\n[SenseVoice]');
   A.nav('me');
   A.change(A.$('#asr-engine'), 'sensevoice');
-  A.$('#asr-key').value = 'sk-sf-bad';
-  A.click(A.$('[data-act="asr-test"]')); await sleep(30);
-  ok(A.$('#flash').textContent.includes('Key 无效'), 'SenseVoice：Key 错误时提示');
-  A.$('#asr-key').value = 'sk-sf-good';
-  A.click(A.$('[data-act="asr-test"]')); await sleep(30);
-  ok(A.$('#flash').textContent.includes('可以用了') && A.w.Speech.cloudReady(), 'SenseVoice：测试通过并启用');
-  A.nav('say');
-  A.click(A.$('[data-act="extra"][data-cat="say"]'));
-  A.click(sayMic()); await sleep(10);
-  ok(sayMic().textContent.includes('说完了'), 'SenseVoice：录音中');
-  A.click(sayMic()); await sleep(30);
-  const up = calls.filter(c => c.url.includes('siliconflow')).pop();
-  ok(up.body.model === 'FunAudioLLM/SenseVoiceSmall' && up.body.file, 'SenseVoice：上传录音，模型正确');
-  ok(sayBox().value === 'Two on B, one behind the car.', 'SenseVoice：识别结果去掉了标签，填进输入框');
+  A.$('#asr-key').value = 'sk-sf-bad'; A.act('asr-test'); await sleep(30);
+  ok(A.$('#flash').textContent.includes('Key 无效'), 'Key 错误时提示');
+  A.$('#asr-key').value = 'sk-sf-good'; A.act('asr-test'); await sleep(30);
+  ok(A.w.Speech.cloudReady(), '测试通过并启用');
+  A.nav('ielts');
+  A.act('drill-next');
+  A.click(drillMic()); await sleep(10); A.click(drillMic()); await sleep(40);
+  ok(A.drillBox().value === 'I would say my hometown is quite small.', '录音上传识别，去掉了标签');
+  ok(calls.filter(c => c.url.includes('siliconflow')).pop().body.model === 'FunAudioLLM/SenseVoiceSmall', '用的是 SenseVoiceSmall 模型');
   A.w.Speech.saveAsrConfig({ engine: 'browser', key: 'sk-sf-good' });
 
-  // 同步：设备 1 开启
-  A.nav('me');
-  A.$('#sync-token').value = 'ghp_test';
-  A.click(A.$('[data-act="sync-connect"]'));
-  await sleep(50);
-  ok(Object.keys(gists).length === 1 && A.w.GistSync.ready(), '同步：创建私密 Gist');
-  const synced = JSON.parse(gists.g1.files['speakup-progress.json'].content);
-  ok(Object.keys(synced.cards).length === 8 && !JSON.stringify(synced).includes('sk-test'), '同步：上传进度，且不包含 API Key');
+  console.log('\n[全真模考]');
+  A.act('ielts-tab', '[data-tab="mock"]');
+  ok(A.text().includes('第 1 / 8 题'), '模考 8 题：Part 1 四题 + Part 2 + Part 3 三题');
+  await answerDrill(A);
+  ok(A.text().includes('全真模考') && A.$$('.qa').length === 8, '模考结束显示每题的反馈');
 
-  console.log('\n[设备 2：手机]');
+  console.log('\n[写作批改]');
+  A.act('ielts-tab', '[data-tab="write"]');
+  ok(A.text().includes('Task 2') && A.text().includes('Write at least 250 words'), '默认是大作文题');
+  A.type(A.$('[data-input="write"]'), 'Some peoples think young people should travel. '.repeat(12));
+  ok(A.$('#wc').textContent === '84', '实时字数统计');
+  A.act('w-submit'); await sleep(30);
+  ok(A.text().includes('写作估分') && A.text().includes('peoples') && A.text().includes('6.5 分改写版'), '批改：四项分数、改错、改写版');
+  ok(JSON.parse(A.w.localStorage.getItem('speakup.wlog')).length === 1, '批改记录保存在本机');
+  A.act('w-task', '[data-task="1"]');
+  ok(A.text().includes('Begin your letter as follows'), '小作文是书信题');
+
+  console.log('\n[成绩与计划]');
+  A.act('ielts-tab', '[data-tab="score"]');
+  A.change(A.$('#t-kind'), 'listening'); A.$('#t-raw').value = '30'; A.act('add-test');
+  A.change(A.$('#t-kind'), 'readingGT'); A.$('#t-raw').value = '27'; A.act('add-test');
+  const bands = A.state().ielts.tests.map(t => t.band).join();
+  ok(bands === '7,5.5', '原始分换算：听力 30/40 = 7.0，G 类阅读 27/40 = 5.5');
+  ok(A.$('.band.main b').textContent === '6.0', '预估总分 = (7 + 5.5 + 5.5 + 5.5) / 4 = 5.875 → 按雅思规则取整为 6.0');
+  A.change(A.$('[data-setting="examDate"]'), '2027-04-10');
+  ok(A.text().includes('基础期') && A.text().includes('距离考试'), '填了考试日期显示倒计时和阶段建议');
+
+  console.log('\n[同步]');
+  A.nav('me');
+  A.$('#sync-token').value = 'ghp_test'; A.act('sync-connect'); await sleep(50);
+  const synced = JSON.parse(gists.g1.files['speakup-progress.json'].content);
+  ok(synced.ielts.tests.length === 2 && synced.ielts.write.length === 1 && !JSON.stringify(synced).includes('sk-test'), '雅思成绩一起同步，API Key 不上传');
   const B = openDevice();
-  B.nav('chunks');
-  B.click(B.$('[data-act="chunk-list"]'));
-  B.$('#cw-en').value = 'Heads up'; B.$('#cw-zh').value = '小心/注意'; B.click(B.$('[data-act="add-custom"]'));
-  B.click(B.$('[data-act="chunk-study"]'));
-  B.key(' '); B.key('3');           // 手机上先学一个自己收藏的
   B.nav('me');
-  B.$('#sync-token').value = 'ghp_test';
-  B.click(B.$('[data-act="sync-connect"]'));
-  await sleep(80);
-  const bs = B.state();
-  ok(Object.keys(bs.cards).length === 9 && bs.cards['my:Heads up'], `同步：两台设备的语块合并（${Object.keys(bs.cards).length}）`);
-  ok(bs.history[bs.today.date].complete === true, '同步：手机上也显示今天已打卡');
-  ok(bs.custom.some(c => c.en === 'Good call'), '同步：收藏的语块也同步过来了');
-  ok(!B.w.AI.ready(), '同步：API Key 不会同步（每台设备单独设置）');
-  await sleep(3200);
-  const final = JSON.parse(gists.g1.files['speakup-progress.json'].content);
-  ok(Object.keys(final.cards).length === 9, '同步：合并结果写回云端');
+  B.$('#sync-token').value = 'ghp_test'; B.act('sync-connect'); await sleep(80);
+  ok(B.state().ielts.speak.length === 2 && B.state().history[B.state().today.date].complete, '手机上能看到口语估分记录和今天的打卡');
+  B.nav('ielts'); B.act('ielts-tab', '[data-tab="score"]');
+  ok(B.$('.band.main b').textContent === '6.0', '手机上的预估总分一致');
+
+  console.log('\n[从旧版本升级]');
+  const today = A.state().today.date;
+  const old = {
+    v: 2, settings: { t: 1, newPerDay: 8, decks: { game: true, work: true, tech: true, daily: true, vocab: false } },
+    cards: { 'g:One on B': { reps: 1, interval: 1, ease: 2.5, due: today, t: 1 }, 'w:ASAP': { reps: 1, interval: 1, ease: 2.5, due: today, t: 1 }, 'd:No way!': { reps: 2, interval: 3, ease: 2.5, due: today, t: 1 } },
+    custom: [{ en: 'Heads up', zh: '小心', t: 1 }], ptr: { say: 3, listen: 4 }, retry: { say: [1], listen: [2] },
+    today: { date: today, items: { say: [1], listen: [2] }, done: { say: [], listen: [] } }, history: { '2026-10-01': { acts: 9, complete: true } }, updatedAt: 1,
+  };
+  const C = openDevice({ 'speakup.v2': JSON.stringify(old) });
+  const cs = C.state();
+  ok(cs.v === 3 && !cs.cards['g:One on B'] && !cs.cards['w:ASAP'], '游戏和外企语块进度已删除');
+  ok(cs.cards['d:No way!'] && cs.custom.length === 1 && cs.history['2026-10-01'].complete, '日常语块、收藏和打卡记录都保留');
+  ok(cs.today.speak && !cs.today.items.say && cs.settings.decks.ielts, '今天的任务换成新结构');
 
   console.log('\n[第二天]');
-  const store = JSON.parse(A.w.localStorage.getItem('speakup.v2'));
+  const store = A.state();
   const shift = k => { const [y, m, d] = k.split('-').map(Number); const t = new Date(y, m - 1, d - 1); return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`; };
   store.today.date = shift(store.today.date);
   store.history = Object.fromEntries(Object.entries(store.history).map(([k, v]) => [shift(k), v]));
   for (const c of Object.values(store.cards)) { c.due = shift(c.due); c.first = shift(c.first); }
-  const retrySay = store.retry.say[0];
-  const C = openDevice({ 'speakup.v2': JSON.stringify(store) });
-  const cs = C.state();
-  ok(cs.today.date !== store.today.date, '新的一天自动生成新任务');
-  ok(C.text().includes('1天连续') || C.$('.streak b').textContent === '1', '连续打卡天数延续');
-  C.nav('chunks');
-  ok(/待复习 <b>8<\/b>/.test(C.$('#app').innerHTML), '昨天的语块今天到期复习');
-  ok(C.text().includes('说出来') && C.$('.prompt-zh'), '复习时看中文、说英文');
-  ok(cs.today.items.say[0] === retrySay, '昨天没说好的题今天优先出现');
+  const D2 = openDevice({ 'speakup.v2': JSON.stringify(store) });
+  ok(D2.state().today.date !== store.today.date && D2.state().today.speak.done === false, '新的一天：新任务，口语重新计');
+  ok(D2.$('.streak b').textContent === '1', '连续打卡天数延续');
+  D2.nav('chunks');
+  ok(/待复习 <b>8<\/b>/.test(D2.$('#app').innerHTML) && D2.$('.prompt-zh'), '昨天的语块今天复习，看中文说英文');
 
   console.log('\n[Claude]');
-  const D = openDevice();
-  D.w.eval(read('vendor/claude.js'));
-  D.w.AI.saveConfig({ provider: 'claude', apiKey: 'sk-ant-test', model: 'claude-opus-5-5' });
-  D.nav('chat');
-  for (let t = 0; t < 2; t++) { D.type(D.$('#chat-input'), 'hello there'); D.click(D.$('[data-act="chat-send"]')); await sleep(30); }
+  const E = openDevice();
+  E.w.eval(read('vendor/claude.js'));
+  E.w.AI.saveConfig({ provider: 'claude', apiKey: 'sk-ant-test', model: 'claude-opus-5-5' });
+  E.nav('chat');
+  for (let t = 0; t < 2; t++) { E.type(E.$('#chat-input'), 'hello there'); E.act('chat-send'); await sleep(30); }
   const cc = calls.filter(c => c.url.includes('anthropic'));
-  if (cc.length < 2) console.log('  DEBUG anthropic calls:', cc.length, '| page:', D.text().slice(-300));
   const second = cc[1].body;
-  const replayed = second.messages[3];
-  ok(cc.length === 2 && second.model === 'claude-opus-5-5' && second.fallbacks === 'default' && second.output_config.format.type === 'json_schema', 'Claude：模型、fallback、结构化输出');
-  ok(replayed.role === 'assistant' && replayed.content[0].type === 'thinking' && replayed.content[0].signature === 'sig-1', 'Claude：上一轮回复（含 thinking 块）原样发回');
-  ok(cc[0].body.system === second.system, 'Claude：整段对话的 system 提示词保持不变');
-  ok(D.text().includes('Claude reply 2'), 'Claude：回复显示在对话里');
+  ok(second.model === 'claude-opus-5-5' && second.fallbacks === 'default' && second.output_config.format.type === 'json_schema', 'Claude：模型、fallback、结构化输出');
+  ok(second.messages[3].content[0].type === 'thinking' && second.messages[3].content[0].signature === 'sig-1', 'Claude：上一轮回复（含 thinking 块）原样发回');
+  E.nav('ielts'); E.act('speak-kind', '[data-kind="p1"]');
+  claudeReplies = 100;
+  E.w.AI.saveConfig({ provider: 'claude', apiKey: 'sk-ant-nocredit', model: 'claude-opus-5-5' });
+  E.nav('me'); E.act('ai-test'); await sleep(50);
+  ok(E.$('#flash').textContent.includes('余额不足'), 'Claude：余额不足时显示中文提示');
 
-  D.w.AI.saveConfig({ provider: 'claude', apiKey: 'sk-ant-nocredit', model: 'claude-opus-5-5' });
-  D.nav('me');
-  D.click(D.$('[data-act="ai-test"]'));
-  await sleep(50);
-  const toast = D.$('#flash').textContent;
-  ok(toast.includes('余额不足') && !toast.includes('{'), 'Claude：余额不足时显示中文提示 → ' + toast.slice(0, 30));
-
-  console.log(failures ? `\n${failures} 项失败` : '\n全部通过');
+  console.log(failures ? `\n${failures} 项失败（${passes} 项通过）` : `\n全部通过（${passes} 项）`);
   process.exit(failures ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });
